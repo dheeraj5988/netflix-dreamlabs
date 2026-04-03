@@ -1,49 +1,43 @@
-import { EmailData } from './gmailService';
+import { EmailData } from './gmailService'
 
 export interface VerificationLink {
-  code: string;
-  url: string;
-  foundIn: string;
+  url: string
+  foundIn: string
 }
 
 export function parseNetflixVerificationLink(
   email: EmailData
 ): VerificationLink | null {
-  // Check if this is a Netflix email
-  const subjectLower = email.subject.toLowerCase();
-  if (
-    !subjectLower.includes('netflix') ||
-    !subjectLower.includes('verification')
-  ) {
-    return null;
-  }
+  // Check if email is from Netflix (subject check is loose — Netflix uses
+  // many subjects like "Verify your Netflix account", "Someone is using 
+  // your Netflix account" etc.)
+  const fromLower = email.from.toLowerCase()
+  const isFromNetflix =
+    fromLower.includes('netflix.com') ||
+    fromLower.includes('info@account.netflix') ||
+    fromLower.includes('noreply@netflix')
 
-  const content = email.html || email.text;
+  if (!isFromNetflix) return null
 
-  // Extract verification link - look for Netflix verify or confirm links
+  const content = email.html || email.text
+
+  // Netflix verification links — match all possible URL patterns
+  // Do NOT require ?code= param — the full URL is the link
   const linkPatterns = [
-    /https:\/\/www\.netflix\.com[^\s"'<>]*(verify|confirm)[^\s"'<>]*/gi,
-    /https:\/\/www\.netflix\.com[^\s"'<>]*code[^\s"'<>]*/gi,
-    /https:\/\/www\.netflix\.com[^\s"'<>]*household[^\s"'<>]*/gi,
-  ];
+    /https:\/\/www\.netflix\.com\/account\/travel\/[^\s"'<>]+/gi,
+    /https:\/\/www\.netflix\.com\/account\/household\/[^\s"'<>]+/gi,
+    /https:\/\/www\.netflix\.com\/verify[^\s"'<>]+/gi,
+    /https:\/\/www\.netflix\.com\/account\/[^\s"'<>]*verify[^\s"'<>]*/gi,
+    /https:\/\/www\.netflix\.com[^\s"'<>]*confirm[^\s"'<>]*/gi,
+  ]
 
   for (const pattern of linkPatterns) {
-    const matches = content.match(pattern);
+    const matches = content.match(pattern)
     if (matches && matches.length > 0) {
-      const url = matches[0];
-      // Extract code from URL
-      const codeMatch = url.match(/[?&]code=([^&\s"'<>]+)/);
-      const code = codeMatch ? codeMatch[1] : '';
-
-      if (code) {
-        return {
-          code,
-          url,
-          foundIn: email.from,
-        };
-      }
+      const url = matches[0].replace(/['">\s]+$/, '')
+      return { url, foundIn: email.from }
     }
   }
 
-  return null;
+  return null
 }

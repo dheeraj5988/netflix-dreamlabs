@@ -1,11 +1,11 @@
-import Imap from 'imap';
-import { simpleParser } from 'mailparser';
+import Imap from 'imap'
+import { simpleParser } from 'mailparser'
 
 export interface EmailData {
-  from: string;
-  subject: string;
-  text: string;
-  html: string;
+  from: string
+  subject: string
+  text: string
+  html: string
 }
 
 export async function fetchEmails(
@@ -21,74 +21,91 @@ export async function fetchEmails(
       port: 993,
       tls: true,
       tlsOptions: { rejectUnauthorized: false },
-      connTimeout: 10000,
+      connTimeout: 15000,
       authTimeout: 10000,
-    });
+    })
 
-    const emails: EmailData[] = [];
-    let pendingMessages = 0;
+    const emails: EmailData[] = []
 
-    imap.on('error', (err) => {
-      imap.end();
-      reject(err);
-    });
+    imap.once('error', (err: Error) => {
+      reject(err)
+    })
 
-    imap.on('end', () => {
-      if (pendingMessages === 0) {
-        resolve(emails);
-      }
-    });
-
-    imap.openBox('INBOX', false, (err) => {
-      if (err) {
-        reject(err);
-        return;
-      }
-
-      const formattedDate = searchSince.toISOString().split('T')[0];
-      imap.search([['SINCE', formattedDate]], (err, results) => {
+    // CRITICAL: Must wait for 'ready' before calling openBox
+    imap.once('ready', () => {
+      imap.openBox('INBOX', false, (err) => {
         if (err) {
-          imap.end();
-          reject(err);
-          return;
+          imap.end()
+          reject(err)
+          return
         }
 
-        if (!results || results.length === 0) {
-          imap.end();
-          return;
-        }
+        // Search for Netflix emails since the given date
+        const searchCriteria = [
+          ['OR',
+            ['FROM', 'info@account.netflix.com'],
+            ['FROM', 'noreply@netflix.com']
+          ],
+          ['SINCE', searchSince]
+        ]
 
-        pendingMessages = results.length;
-        const f = imap.fetch(results, { bodies: '' });
+        imap.search(searchCriteria, (err, results) => {
+          if (err) {
+            imap.end()
+            reject(err)
+            return
+          }
 
-        f.on('message', (msg) => {
-          simpleParser(msg, (err, parsed) => {
-            if (!err && parsed) {
-              emails.push({
-                from: parsed.from?.text || '',
-                subject: parsed.subject || '',
-                text: parsed.text || '',
-                html: parsed.html || '',
-              });
-            }
-            pendingMessages--;
-            if (pendingMessages === 0) {
-              imap.end();
-            }
-          });
-        });
+          if (!results || results.length === 0) {
+            imap.end()
+            resolve([])
+            return
+          }
 
-        f.on('error', (err) => {
-          imap.end();
-          reject(err);
-        });
+          const fetch = imap.fetch(results, { bodies: '' })
+          const parsePromises: Promise<void>[] = []
 
-        f.on('end', () => {
-          // Wait for all messages to be parsed
-        });
-      });
-    });
+          fetch.on('message', (msg) => {
+            const promise = new Promise<void>((res) => {
+              const chunks: Buffer[] = []
 
-    imap.openConnection();
-  });
+              msg.on('body', (stream) => {
+                stream.on('data', (chunk: Buffer) => chunks.push(chunk))
+                stream.once('end', async () => {
+                  try {
+                    const buffer = Buffer.concat(chunks)
+                    const parsed = await simpleParser(buffer)
+                    emails.push({
+                      from: parsed.from?.text || '',
+                      subject: parsed.subject || '',
+                      text: parsed.text || '',
+                      html: (parsed.html as string) || '',
+                    })
+                  } catch {
+                    // skip unparseable emails
+                  }
+                  res()
+                })
+              })
+            })
+            parsePromises.push(promise)
+          })
+
+          fetch.once('error', (err) => {
+            imap.end()
+            reject(err)
+          })
+
+          fetch.once('end', async () => {
+            await Promise.all(parsePromises)
+            imap.end()
+            resolve(emails)
+          })
+        })
+      })
+    })
+
+    // CRITICAL: This is the correct method to initiate connection
+    imap.connect()
+  })
 }

@@ -19,8 +19,8 @@ export async function GET(request: Request) {
   const searchSince = new Date(Date.now() - minutes * 60 * 1000);
 
   // Get credentials from environment variables
-  const emailKey = `GMAIL_ACCOUNT_${account}_EMAIL`;
-  const passwordKey = `GMAIL_ACCOUNT_${account}_PASSWORD`;
+  const emailKey = `GMAIL_USER_${account}`;
+  const passwordKey = `GMAIL_APP_PASSWORD_${account}`;
 
   const userEmail = process.env[emailKey];
   const appPassword = process.env[passwordKey];

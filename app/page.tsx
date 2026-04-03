@@ -66,7 +66,7 @@ export default function Home() {
   return (
     <div className="bg-[#141414] min-h-screen flex flex-col items-center justify-center p-4">
       {/* Header */}
-      <div className="text-center mb-32">
+      <div className="text-center mb-8">
         <h1 className="text-3xl font-bold text-white">Dream Labs Solutions</h1>
         <h2 className="text-2xl font-semibold text-[#E50914] mt-2">
           Netflix Household Updater
