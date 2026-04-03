@@ -6,16 +6,19 @@ export interface VerificationLink {
   foundIn: string;
 }
 
-function parseNetflixVerificationLink(email: EmailData): VerificationLink | null {
+export function parseNetflixVerificationLink(
+  email: EmailData
+): VerificationLink | null {
   // Check if this is a Netflix email
+  const subjectLower = email.subject.toLowerCase();
   if (
-    !email.subject.includes('Netflix') ||
-    !email.subject.includes('verification')
+    !subjectLower.includes('netflix') ||
+    !subjectLower.includes('verification')
   ) {
     return null;
   }
 
-  let content = email.html || email.text;
+  const content = email.html || email.text;
 
   // Extract verification link - look for Netflix verify or confirm links
   const linkPatterns = [
@@ -25,9 +28,9 @@ function parseNetflixVerificationLink(email: EmailData): VerificationLink | null
   ];
 
   for (const pattern of linkPatterns) {
-    const match = content.match(pattern);
-    if (match) {
-      const url = match[0];
+    const matches = content.match(pattern);
+    if (matches && matches.length > 0) {
+      const url = matches[0];
       // Extract code from URL
       const codeMatch = url.match(/[?&]code=([^&\s"'<>]+)/);
       const code = codeMatch ? codeMatch[1] : '';
@@ -44,5 +47,3 @@ function parseNetflixVerificationLink(email: EmailData): VerificationLink | null
 
   return null;
 }
-
-export { parseNetflixVerificationLink };

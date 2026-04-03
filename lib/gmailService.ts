@@ -8,7 +8,7 @@ export interface EmailData {
   html: string;
 }
 
-async function fetchEmails(
+export async function fetchEmails(
   userEmail: string,
   appPassword: string,
   searchSince: Date
@@ -21,20 +21,25 @@ async function fetchEmails(
       port: 993,
       tls: true,
       tlsOptions: { rejectUnauthorized: false },
+      connTimeout: 10000,
+      authTimeout: 10000,
     });
 
     const emails: EmailData[] = [];
+    let pendingMessages = 0;
 
-    const openInbox = (cb: (err: any, mailbox: any) => void) => {
-      imap.openBox('INBOX', false, cb);
-    };
-
-    imap.on('error', reject);
-    imap.on('end', () => {
-      resolve(emails);
+    imap.on('error', (err) => {
+      imap.end();
+      reject(err);
     });
 
-    imap.openBox('INBOX', false, (err, mailbox) => {
+    imap.on('end', () => {
+      if (pendingMessages === 0) {
+        resolve(emails);
+      }
+    });
+
+    imap.openBox('INBOX', false, (err) => {
       if (err) {
         reject(err);
         return;
@@ -43,6 +48,7 @@ async function fetchEmails(
       const formattedDate = searchSince.toISOString().split('T')[0];
       imap.search([['SINCE', formattedDate]], (err, results) => {
         if (err) {
+          imap.end();
           reject(err);
           return;
         }
@@ -52,9 +58,11 @@ async function fetchEmails(
           return;
         }
 
+        pendingMessages = results.length;
         const f = imap.fetch(results, { bodies: '' });
-        f.on('message', (msg: any) => {
-          simpleParser(msg, async (err: any, parsed: any) => {
+
+        f.on('message', (msg) => {
+          simpleParser(msg, (err, parsed) => {
             if (!err && parsed) {
               emails.push({
                 from: parsed.from?.text || '',
@@ -63,20 +71,24 @@ async function fetchEmails(
                 html: parsed.html || '',
               });
             }
+            pendingMessages--;
+            if (pendingMessages === 0) {
+              imap.end();
+            }
           });
         });
 
-        f.on('error', reject);
-        f.on('end', () => {
+        f.on('error', (err) => {
           imap.end();
+          reject(err);
+        });
+
+        f.on('end', () => {
+          // Wait for all messages to be parsed
         });
       });
     });
 
-    imap.openBox('INBOX', false, (err) => {
-      if (err) reject(err);
-    });
+    imap.openConnection();
   });
 }
-
-export { fetchEmails };

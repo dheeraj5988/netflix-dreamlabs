@@ -1,35 +1,32 @@
-export interface FetchCodeResponse {
-  success?: boolean;
+export interface FetchNetflixLinkResponse {
+  success: boolean;
+  link?: string;
   code?: string;
-  url?: string;
-  error?: string;
+  message: string;
 }
 
-export async function fetchNetflixCode(
-  accountNumber: number
-): Promise<FetchCodeResponse> {
+export async function fetchLatestNetflixLink(
+  account: number,
+  minutes: number = 30
+): Promise<FetchNetflixLinkResponse> {
   try {
-    const response = await fetch('/api/fetch-code', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ accountNumber }),
-    });
-
-    const data: FetchCodeResponse = await response.json();
+    const response = await fetch(
+      `/api/latest-netflix-link?account=${account}&minutes=${minutes}`
+    );
 
     if (!response.ok) {
       return {
-        error: data.error || 'Failed to fetch verification code',
+        success: false,
+        message: 'Network error. Please try again.',
       };
     }
 
+    const data: FetchNetflixLinkResponse = await response.json();
     return data;
   } catch (error) {
     return {
-      error:
-        error instanceof Error ? error.message : 'An unexpected error occurred',
+      success: false,
+      message: 'Service is temporarily unavailable. Please try again shortly.',
     };
   }
 }

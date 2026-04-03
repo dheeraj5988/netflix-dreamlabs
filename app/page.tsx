@@ -1,259 +1,219 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Card } from '@/components/ui/card';
-import { Alert, AlertDescription } from '@/components/ui/alert';
-import { fetchNetflixCode } from '@/lib/api';
+import { AlertTriangle, CheckCircle2, ExternalLink, ArrowLeft, Loader } from 'lucide-react';
+import { fetchLatestNetflixLink } from '@/lib/api';
+
+type Status = 'idle' | 'verifying' | 'fetching' | 'success' | 'error';
 
 export default function Home() {
-  const [accountNumber, setAccountNumber] = useState('');
   const [mobileNumber, setMobileNumber] = useState('');
-  const [code, setCode] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [success, setSuccess] = useState(false);
-  const [codeUrl, setCodeUrl] = useState('');
-  const [storedCodes, setStoredCodes] = useState<
-    { account: number; code: string; timestamp: string }[]
-  >([]);
+  const [selectedAccount, setSelectedAccount] = useState<number | null>(null);
+  const [status, setStatus] = useState<Status>('idle');
+  const [netflixLink, setNetflixLink] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState('');
   const [mounted, setMounted] = useState(false);
 
-  // Load stored codes from localStorage on mount
+  // On mount - load saved preferences from localStorage
   useEffect(() => {
     setMounted(true);
-    const stored = localStorage.getItem('netflixCodes');
-    if (stored) {
-      try {
-        setStoredCodes(JSON.parse(stored));
-      } catch (e) {
-        console.error('Failed to parse stored codes');
-      }
+    const savedMobile = localStorage.getItem('dreamlabs_mobile');
+    const savedAccount = localStorage.getItem('dreamlabs_account');
+
+    if (savedMobile) setMobileNumber(savedMobile);
+    if (savedAccount) {
+      const num = parseInt(savedAccount);
+      if (num >= 1 && num <= 5) setSelectedAccount(num);
     }
   }, []);
 
-  const handleFetchCode = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError('');
-    setSuccess(false);
-    setCode('');
-    setCodeUrl('');
+  const handleCheckPermission = async () => {
+    if (mobileNumber.length !== 10 || selectedAccount === null) return;
 
-    // Validate inputs
-    if (!accountNumber) {
-      setError('Please select an account number');
-      return;
-    }
+    // Save preferences to localStorage
+    localStorage.setItem('dreamlabs_mobile', mobileNumber);
+    localStorage.setItem('dreamlabs_account', String(selectedAccount));
 
-    const accountNum = parseInt(accountNumber, 10);
-    if (isNaN(accountNum) || accountNum < 1 || accountNum > 5) {
-      setError('Account number must be between 1 and 5');
-      return;
-    }
+    setStatus('verifying');
+    await new Promise((resolve) => setTimeout(resolve, 1000));
 
-    if (!mobileNumber) {
-      setError('Please enter a mobile number');
-      return;
-    }
-
-    if (mobileNumber.replace(/\D/g, '').length !== 10) {
-      setError('Mobile number must contain 10 digits');
-      return;
-    }
-
-    setLoading(true);
-
+    setStatus('fetching');
     try {
-      const result = await fetchNetflixCode(accountNum);
-
-      if (result.error) {
-        setError(result.error);
-      } else if (result.code) {
-        setCode(result.code);
-        setCodeUrl(result.url || '');
-        setSuccess(true);
-
-        // Store the code
-        const newCodes = [
-          ...storedCodes,
-          {
-            account: accountNum,
-            code: result.code,
-            timestamp: new Date().toLocaleString(),
-          },
-        ].slice(-10); // Keep last 10 codes
-
-        setStoredCodes(newCodes);
-        localStorage.setItem('netflixCodes', JSON.stringify(newCodes));
+      const res = await fetchLatestNetflixLink(selectedAccount, 30);
+      if (res.success && res.link) {
+        setNetflixLink(res.link);
+        setStatus('success');
+      } else {
+        setErrorMessage(res.message || 'An error occurred');
+        setStatus('error');
       }
-    } catch (err) {
-      setError('An unexpected error occurred');
-    } finally {
-      setLoading(false);
+    } catch (error) {
+      setErrorMessage(
+        'Service is temporarily unavailable. Please try again shortly.'
+      );
+      setStatus('error');
     }
   };
 
-  const clearHistory = () => {
-    setStoredCodes([]);
-    localStorage.removeItem('netflixCodes');
+  const handleReset = () => {
+    setStatus('idle');
+    setNetflixLink(null);
+    setErrorMessage('');
   };
+
+  if (!mounted) return null;
 
   return (
-    <main className="min-h-screen bg-gradient-to-b from-black to-[#1a1a1a] text-white p-4">
-      <div className="max-w-2xl mx-auto py-12">
-        {/* Header */}
-        <div className="text-center mb-12">
-          <h1 className="text-5xl font-bold mb-4">Netflix Household</h1>
-          <p className="text-xl text-gray-400">
-            Get your verification code instantly
-          </p>
-        </div>
-
-        {/* Main Form Card */}
-        <Card className="bg-[#222] border-[#333] mb-8 p-8">
-          <form onSubmit={handleFetchCode} className="space-y-6">
-            {/* Error Alert */}
-            {error && (
-              <Alert className="bg-red-900/20 border-red-800 text-red-300">
-                <AlertDescription>{error}</AlertDescription>
-              </Alert>
-            )}
-
-            {/* Success Alert */}
-            {success && code && (
-              <Alert className="bg-green-900/20 border-green-800 text-green-300">
-                <AlertDescription>
-                  Verification code found! Check below for your code.
-                </AlertDescription>
-              </Alert>
-            )}
-
-            {/* Account Number Selection */}
-            <div className="space-y-2">
-              <label htmlFor="account" className="block text-sm font-medium">
-                Account Number
-              </label>
-              <div className="grid grid-cols-5 gap-2">
-                {[1, 2, 3, 4, 5].map((num) => (
-                  <button
-                    key={num}
-                    type="button"
-                    onClick={() => setAccountNumber(String(num))}
-                    className={`py-3 px-4 rounded-lg font-semibold transition-all ${
-                      accountNumber === String(num)
-                        ? 'bg-[#E50914] text-white'
-                        : 'bg-[#333] text-gray-300 hover:bg-[#444]'
-                    }`}
-                  >
-                    {num}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Mobile Number Input */}
-            <div className="space-y-2">
-              <label htmlFor="mobile" className="block text-sm font-medium">
-                Mobile Number (10 digits)
-              </label>
-              <Input
-                id="mobile"
-                type="tel"
-                placeholder="Enter 10-digit mobile number"
-                value={mobileNumber}
-                onChange={(e) =>
-                  setMobileNumber(e.target.value.replace(/\D/g, '').slice(0, 10))
-                }
-                className="bg-[#333] border-[#444] text-white placeholder:text-gray-500"
-              />
-            </div>
-
-            {/* Submit Button */}
-            <Button
-              type="submit"
-              disabled={loading}
-              className="w-full bg-[#E50914] hover:bg-[#C40812] text-white font-bold py-3 rounded-lg"
-            >
-              {loading ? 'Fetching Code...' : 'Get Verification Code'}
-            </Button>
-          </form>
-        </Card>
-
-        {/* Code Display Section */}
-        {success && code && (
-          <Card className="bg-[#222] border-[#333] mb-8 p-8">
-            <h2 className="text-2xl font-bold mb-4">Your Verification Code</h2>
-            <div className="space-y-4">
-              <div className="bg-[#111] border-2 border-[#E50914] rounded-lg p-6 text-center">
-                <p className="text-gray-400 text-sm mb-2">Code</p>
-                <p className="text-4xl font-mono font-bold text-[#E50914] break-all">
-                  {code}
-                </p>
-              </div>
-
-              {codeUrl && (
-                <div className="space-y-2">
-                  <p className="text-sm text-gray-400">Or use the direct link:</p>
-                  <a
-                    href={codeUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="block w-full bg-[#333] hover:bg-[#444] text-white p-3 rounded-lg text-center text-sm break-all"
-                  >
-                    Open Netflix Link
-                  </a>
-                </div>
-              )}
-            </div>
-          </Card>
-        )}
-
-        {/* History Section */}
-        {mounted && storedCodes.length > 0 && (
-          <Card className="bg-[#222] border-[#333] p-8">
-            <div className="flex items-center justify-between mb-6">
-              <h2 className="text-2xl font-bold">Recent Codes</h2>
-              <Button
-                onClick={clearHistory}
-                variant="outline"
-                className="border-[#444] text-gray-300 hover:bg-[#333]"
-              >
-                Clear History
-              </Button>
-            </div>
-
-            <div className="space-y-3">
-              {storedCodes
-                .slice()
-                .reverse()
-                .map((entry, index) => (
-                  <div
-                    key={index}
-                    className="bg-[#111] border border-[#333] rounded-lg p-4 flex items-center justify-between"
-                  >
-                    <div>
-                      <p className="font-mono font-semibold text-[#E50914]">
-                        {entry.code}
-                      </p>
-                      <p className="text-xs text-gray-500 mt-1">
-                        Account {entry.account} • {entry.timestamp}
-                      </p>
-                    </div>
-                    <button
-                      onClick={() => {
-                        navigator.clipboard.writeText(entry.code);
-                      }}
-                      className="text-gray-400 hover:text-white text-sm"
-                    >
-                      Copy
-                    </button>
-                  </div>
-                ))}
-            </div>
-          </Card>
-        )}
+    <div className="bg-[#141414] min-h-screen flex flex-col items-center justify-center p-4">
+      {/* Header */}
+      <div className="text-center mb-32">
+        <h1 className="text-3xl font-bold text-white">Dream Labs Solutions</h1>
+        <h2 className="text-2xl font-semibold text-[#E50914] mt-2">
+          Netflix Household Updater
+        </h2>
+        <p className="text-sm text-[#999999] mt-2">
+          Verify your access and update your device
+        </p>
       </div>
-    </main>
+
+      {/* Main Card */}
+      <div className="max-w-[800px] w-full bg-[#1f1f1f] border border-[#333333] rounded-xl p-8">
+        <div className="flex flex-col md:flex-row gap-6">
+          {/* Left Panel - Account Selection */}
+          <div className="w-full md:w-[35%]">
+            <div className="text-sm font-medium text-[#999999] mb-3">
+              Select Account
+            </div>
+            <div className="space-y-2">
+              {[1, 2, 3, 4, 5].map((accountNum) => (
+                <button
+                  key={accountNum}
+                  onClick={() => setSelectedAccount(accountNum)}
+                  className={`w-full text-left px-4 py-3 rounded-lg transition-all duration-200 ${
+                    selectedAccount === accountNum
+                      ? 'bg-[#2a1a1a] border-t border-r border-b border-[#E50914]/50 border-l-4 border-l-[#E50914] text-white font-bold shadow-[0_0_12px_rgba(229,9,20,0.3)] cursor-pointer'
+                      : 'bg-[#141414] border border-[#333333] text-[#999999] hover:border-[#E50914]/50 hover:bg-[#1a1a1a] cursor-pointer'
+                  }`}
+                >
+                  Account {accountNum}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Vertical Divider */}
+          <div className="w-px bg-[#333333] self-stretch hidden md:block" />
+
+          {/* Right Panel - Dynamic Content */}
+          <div className="flex-1">
+            {status === 'idle' && (
+              <>
+                <label className="text-sm text-[#999999] mb-1 block">
+                  Mobile Number
+                </label>
+                <input
+                  type="tel"
+                  value={mobileNumber}
+                  onChange={(e) => {
+                    const digits = e.target.value.replace(/\D/g, '');
+                    setMobileNumber(digits.slice(0, 10));
+                  }}
+                  className="w-full bg-[#141414] border border-[#333333] text-white rounded-lg px-4 py-3 focus:outline-none focus:border-[#E50914] focus:ring-1 focus:ring-[#E50914]"
+                  placeholder="Enter 10-digit mobile number"
+                />
+                <p className="text-xs text-[#999999] mt-1">
+                  {mobileNumber.length}/10 digits
+                </p>
+                <button
+                  onClick={handleCheckPermission}
+                  disabled={mobileNumber.length !== 10 || selectedAccount === null}
+                  className="w-full mt-4 bg-[#E50914] hover:bg-[#C40812] text-white font-semibold py-3 rounded-lg transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Check Permission
+                </button>
+              </>
+            )}
+
+            {status === 'verifying' && (
+              <div className="flex flex-col items-center justify-center h-40">
+                <Loader className="w-10 h-10 text-[#E50914] animate-spin" />
+                <p className="text-white mt-4">Verifying your access...</p>
+              </div>
+            )}
+
+            {status === 'fetching' && (
+              <div className="flex flex-col items-center justify-center h-40">
+                <CheckCircle2 className="w-10 h-10 text-green-500" />
+                <p className="text-green-500 font-semibold mt-2">
+                  ✓ Access Verified!
+                </p>
+                <div className="flex items-center gap-2 mt-3">
+                  <Loader className="w-5 h-5 text-white animate-spin" />
+                  <p className="text-white">Fetching latest update link...</p>
+                </div>
+              </div>
+            )}
+
+            {status === 'success' && (
+              <div className="flex flex-col items-center justify-center h-auto">
+                <CheckCircle2 className="w-16 h-16 text-green-500" />
+                <p className="text-2xl font-bold text-white mt-3">
+                  Access Verified!
+                </p>
+                <p className="text-sm text-[#999999] mt-1">
+                  Click below to verify your device with Netflix
+                </p>
+                <button
+                  onClick={() => window.open(netflixLink, '_blank')}
+                  className="w-full mt-6 bg-[#E50914] hover:bg-[#C40812] text-white font-semibold py-3 rounded-lg flex items-center justify-center gap-2 transition-all duration-200"
+                >
+                  Update My Device
+                  <ExternalLink className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={handleReset}
+                  className="w-full mt-2 text-[#999999] hover:text-white py-2 rounded-lg transition-colors"
+                >
+                  <ArrowLeft className="w-4 h-4 inline mr-2" />
+                  Check Another Number
+                </button>
+              </div>
+            )}
+
+            {status === 'error' && (
+              <div className="flex flex-col items-center justify-center h-auto">
+                <AlertTriangle className="w-16 h-16 text-yellow-500" />
+                <p className="text-xl font-bold text-white mt-3">
+                  ⚠ Error Fetching Link
+                </p>
+                <p className="text-sm text-[#999999] mt-2 text-center max-w-xs">
+                  {errorMessage}
+                </p>
+                <div className="flex gap-3 mt-6 w-full">
+                  <button
+                    onClick={handleCheckPermission}
+                    className="flex-1 bg-[#E50914] hover:bg-[#C40812] text-white font-semibold py-2 rounded-lg transition-all duration-200"
+                  >
+                    Retry
+                  </button>
+                  <button
+                    onClick={handleReset}
+                    className="flex-1 border border-[#333333] text-white hover:bg-[#333333] font-semibold py-2 rounded-lg transition-all duration-200"
+                  >
+                    <ArrowLeft className="w-4 h-4 inline mr-2" />
+                    Back
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Footer */}
+      <div className="mt-6 text-center text-xs text-[#999999]">
+        For authorized users only • Dream Labs Solutions
+      </div>
+    </div>
   );
 }
