@@ -18,9 +18,11 @@ export default function Home() {
   const [storedCodes, setStoredCodes] = useState<
     { account: number; code: string; timestamp: string }[]
   >([]);
+  const [mounted, setMounted] = useState(false);
 
   // Load stored codes from localStorage on mount
   useEffect(() => {
+    setMounted(true);
     const stored = localStorage.getItem('netflixCodes');
     if (stored) {
       try {
@@ -208,7 +210,7 @@ export default function Home() {
         )}
 
         {/* History Section */}
-        {storedCodes.length > 0 && (
+        {mounted && storedCodes.length > 0 && (
           <Card className="bg-[#222] border-[#333] p-8">
             <div className="flex items-center justify-between mb-6">
               <h2 className="text-2xl font-bold">Recent Codes</h2>
