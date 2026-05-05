@@ -42,9 +42,8 @@ export async function GET(request: Request) {
       if (verificationLink) {
         return Response.json({
           success: true,
-          link: verificationLink.url,
-          code: verificationLink.code,
-          message: 'Verification link found successfully.',
+          url: verificationLink.url,
+          message: 'Update link found successfully.',
         });
       }
     }

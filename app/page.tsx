@@ -40,8 +40,8 @@ export default function Home() {
     setStatus('fetching');
     try {
       const res = await fetchLatestNetflixLink(selectedAccount, 30);
-      if (res.success && res.link) {
-        setNetflixLink(res.link);
+      if (res.success && res.url) {
+        setNetflixLink(res.url);
         setStatus('success');
       } else {
         setErrorMessage(res.message || 'An error occurred');
@@ -72,7 +72,7 @@ export default function Home() {
           Netflix Household Updater
         </h2>
         <p className="text-sm text-[#999999] mt-2">
-          Verify your access and update your device
+          Verify your access and update your devices
         </p>
       </div>
 
@@ -89,11 +89,10 @@ export default function Home() {
                 <button
                   key={accountNum}
                   onClick={() => setSelectedAccount(accountNum)}
-                  className={`w-full text-left px-4 py-3 rounded-lg transition-all duration-200 ${
-                    selectedAccount === accountNum
+                  className={`w-full text-left px-4 py-3 rounded-lg transition-all duration-200 ${selectedAccount === accountNum
                       ? 'bg-[#2a1a1a] border-t border-r border-b border-[#E50914]/50 border-l-4 border-l-[#E50914] text-white font-bold shadow-[0_0_12px_rgba(229,9,20,0.3)] cursor-pointer'
                       : 'bg-[#141414] border border-[#333333] text-[#999999] hover:border-[#E50914]/50 hover:bg-[#1a1a1a] cursor-pointer'
-                  }`}
+                    }`}
                 >
                   Account {accountNum}
                 </button>
@@ -164,7 +163,11 @@ export default function Home() {
                   Click below to verify your device with Netflix
                 </p>
                 <button
-                  onClick={() => window.open(netflixLink, '_blank')}
+                  onClick={() => {
+                    if (netflixLink) {
+                      window.open(netflixLink, '_blank', 'noopener,noreferrer');
+                    }
+                  }}
                   className="w-full mt-6 bg-[#E50914] hover:bg-[#C40812] text-white font-semibold py-3 rounded-lg flex items-center justify-center gap-2 transition-all duration-200"
                 >
                   Update My Device
