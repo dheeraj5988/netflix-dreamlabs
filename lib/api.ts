@@ -1,7 +1,6 @@
 export interface FetchNetflixLinkResponse {
   success: boolean;
-  link?: string;
-  code?: string;
+  url?: string;
   message: string;
 }
 

@@ -8,9 +8,7 @@ export interface VerificationLink {
 export function parseNetflixVerificationLink(
   email: EmailData
 ): VerificationLink | null {
-  // Check if email is from Netflix (subject check is loose — Netflix uses
-  // many subjects like "Verify your Netflix account", "Someone is using 
-  // your Netflix account" etc.)
+  // Check if email is from Netflix
   const fromLower = email.from.toLowerCase()
   const isFromNetflix =
     fromLower.includes('netflix.com') ||
@@ -21,8 +19,15 @@ export function parseNetflixVerificationLink(
 
   const content = email.html || email.text
 
-  // Netflix verification links — match all possible URL patterns
-  // Do NOT require ?code= param — the full URL is the link
+  // Look for "Update Primary Location" URL first (priority for household updates)
+  const updatePrimaryLocationRegex = /https:\/\/www\.netflix\.com\/account\/update-primary-location\?[^\s"'<>]+/i
+  const updateMatch = content.match(updatePrimaryLocationRegex)
+  if (updateMatch) {
+    const url = updateMatch[0].replace(/['">\s]+$/, '')
+    return { url, foundIn: email.from }
+  }
+
+  // Fall back to other Netflix verification/household URLs
   const linkPatterns = [
     /https:\/\/www\.netflix\.com\/account\/travel\/[^\s"'<>]+/gi,
     /https:\/\/www\.netflix\.com\/account\/household\/[^\s"'<>]+/gi,

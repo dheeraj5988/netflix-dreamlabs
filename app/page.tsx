@@ -40,8 +40,8 @@ export default function Home() {
     setStatus('fetching');
     try {
       const res = await fetchLatestNetflixLink(selectedAccount, 30);
-      if (res.success && res.link) {
-        setNetflixLink(res.link);
+      if (res.success && res.url) {
+        setNetflixLink(res.url);
         setStatus('success');
       } else {
         setErrorMessage(res.message || 'An error occurred');
