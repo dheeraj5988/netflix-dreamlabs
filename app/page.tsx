@@ -163,7 +163,11 @@ export default function Home() {
                   Click below to verify your device with Netflix
                 </p>
                 <button
-                  onClick={() => window.open(netflixLink, '_blank')}
+                  onClick={() => {
+                    if (netflixLink) {
+                      window.open(netflixLink, '_blank', 'noopener,noreferrer');
+                    }
+                  }}
                   className="w-full mt-6 bg-[#E50914] hover:bg-[#C40812] text-white font-semibold py-3 rounded-lg flex items-center justify-center gap-2 transition-all duration-200"
                 >
                   Update My Device
