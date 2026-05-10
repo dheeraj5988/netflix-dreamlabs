@@ -6,15 +6,14 @@ export interface EmailData {
   subject: string
   text: string
   html: string
+  date: Date
 }
 
-export async function fetchEmails(
-  userEmail: string,
-  appPassword: string,
-  searchSince: Date
-): Promise<EmailData[]> {
-  return new Promise((resolve, reject) => {
-    const imap = new Imap({
+class GmailService {
+  private imap: Imap
+
+  constructor(userEmail: string, appPassword: string) {
+    this.imap = new Imap({
       user: userEmail,
       password: appPassword.replace(/\s/g, ''),
       host: 'imap.gmail.com',
@@ -24,88 +23,133 @@ export async function fetchEmails(
       connTimeout: 15000,
       authTimeout: 10000,
     })
+  }
 
-    const emails: EmailData[] = []
-
-    imap.once('error', (err: Error) => {
-      reject(err)
+  private createConnection(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.imap.once('ready', () => resolve())
+      this.imap.once('error', (err) => reject(err))
+      this.imap.once('close', () => reject(new Error('Connection closed')))
+      this.imap.connect()
     })
+  }
 
-    // CRITICAL: Must wait for 'ready' before calling openBox
-    imap.once('ready', () => {
-      imap.openBox('INBOX', false, (err) => {
-        if (err) {
-          imap.end()
-          reject(err)
+  private openInbox(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.imap.openBox('INBOX', false, (err) => {
+        if (err) reject(err)
+        else resolve()
+      })
+    })
+  }
+
+  private searchEmails(
+    emailAddresses: string[],
+    searchSince: Date
+  ): Promise<number[]> {
+    return new Promise((resolve, reject) => {
+      // Build sequential searches: try first email address, then second if needed
+      const performSearch = (index: number) => {
+        if (index >= emailAddresses.length) {
+          resolve([])
           return
         }
 
-        // Search for Netflix emails since the given date
-        const searchCriteria = [
-          ['OR',
-            ['FROM', 'info@account.netflix.com'],
-            ['FROM', 'noreply@netflix.com']
-          ],
-          ['SINCE', searchSince]
-        ]
+        const criteria = [['FROM', emailAddresses[index]], ['SINCE', searchSince]]
 
-        imap.search(searchCriteria, (err, results) => {
+        this.imap.search(criteria, (err, results) => {
           if (err) {
-            imap.end()
             reject(err)
             return
           }
 
-          if (!results || results.length === 0) {
-            imap.end()
-            resolve([])
-            return
+          if (results && results.length > 0) {
+            resolve(results)
+          } else {
+            // No results, try next email address
+            performSearch(index + 1)
           }
+        })
+      }
 
-          const fetch = imap.fetch(results, { bodies: '' })
-          const parsePromises: Promise<void>[] = []
+      performSearch(0)
+    })
+  }
 
-          fetch.on('message', (msg) => {
-            const promise = new Promise<void>((res) => {
-              const chunks: Buffer[] = []
+  private fetchEmail(uid: number): Promise<EmailData> {
+    return new Promise((resolve, reject) => {
+      const f = this.imap.fetch(uid, { bodies: '' })
 
-              msg.on('body', (stream) => {
-                stream.on('data', (chunk: Buffer) => chunks.push(chunk))
-                stream.once('end', async () => {
-                  try {
-                    const buffer = Buffer.concat(chunks)
-                    const parsed = await simpleParser(buffer)
-                    emails.push({
-                      from: parsed.from?.text || '',
-                      subject: parsed.subject || '',
-                      text: parsed.text || '',
-                      html: (parsed.html as string) || '',
-                    })
-                  } catch {
-                    // skip unparseable emails
-                  }
-                  res()
-                })
+      f.on('message', (msg) => {
+        const chunks: Buffer[] = []
+
+        msg.on('body', (stream) => {
+          stream.on('data', (chunk: Buffer) => chunks.push(chunk))
+          stream.once('end', async () => {
+            try {
+              const buffer = Buffer.concat(chunks)
+              const parsed = await simpleParser(buffer)
+              resolve({
+                from: parsed.from?.text || '',
+                subject: parsed.subject || '',
+                text: parsed.text || '',
+                html: (parsed.html as string) || '',
+                date: parsed.date || new Date(),
               })
-            })
-            parsePromises.push(promise)
-          })
-
-          fetch.once('error', (err) => {
-            imap.end()
-            reject(err)
-          })
-
-          fetch.once('end', async () => {
-            await Promise.all(parsePromises)
-            imap.end()
-            resolve(emails)
+            } catch (err) {
+              reject(err)
+            }
           })
         })
       })
-    })
 
-    // CRITICAL: This is the correct method to initiate connection
-    imap.connect()
-  })
+      f.once('error', (err) => reject(err))
+    })
+  }
+
+  private closeConnection(): Promise<void> {
+    return new Promise((resolve) => {
+      this.imap.end()
+      this.imap.once('close', () => resolve())
+      // Fallback timeout to prevent hanging
+      setTimeout(resolve, 1000)
+    })
+  }
+
+  async fetchLatestEmail(
+    searchSince: Date
+  ): Promise<EmailData | null> {
+    try {
+      await this.createConnection()
+      await this.openInbox()
+
+      // Sequential search: try info@account.netflix.com first, then noreply@netflix.com
+      const results = await this.searchEmails(
+        ['info@account.netflix.com', 'noreply@netflix.com'],
+        searchSince
+      )
+
+      if (!results || results.length === 0) {
+        return null
+      }
+
+      // Get the LATEST email UID (highest number = most recent)
+      const latestEmailId = results[results.length - 1]
+
+      // Fetch only this single email
+      const email = await this.fetchEmail(latestEmailId)
+      return email
+    } finally {
+      await this.closeConnection()
+    }
+  }
+}
+
+export async function fetchLatestNetflixEmail(
+  userEmail: string,
+  appPassword: string,
+  searchSince: Date
+): Promise<EmailData | null> {
+  const service = new GmailService(userEmail, appPassword)
+  return service.fetchLatestEmail(searchSince)
 }

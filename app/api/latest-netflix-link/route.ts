@@ -1,4 +1,4 @@
-import { fetchEmails } from '@/lib/gmailService';
+import { fetchLatestNetflixEmail } from '@/lib/gmailService';
 import { parseNetflixVerificationLink } from '@/lib/emailParser';
 
 export async function GET(request: Request) {
@@ -33,27 +33,66 @@ export async function GET(request: Request) {
   }
 
   try {
-    // Fetch emails from Gmail
-    const emails = await fetchEmails(userEmail, appPassword, searchSince);
+    // Fetch the latest Netflix email from Gmail
+    const email = await fetchLatestNetflixEmail(
+      userEmail,
+      appPassword,
+      searchSince
+    );
 
-    // Parse emails to find Netflix verification link
-    for (const email of emails) {
-      const verificationLink = parseNetflixVerificationLink(email);
-      if (verificationLink) {
-        return Response.json({
-          success: true,
-          url: verificationLink.url,
-          message: 'Update link found successfully.',
-        });
-      }
+    if (!email) {
+      return Response.json({
+        success: false,
+        message: `No Netflix verification link found in the last ${minutes} minutes.`,
+      });
+    }
+
+    // Strict JavaScript-level time filtering
+    // IMAP SINCE only filters by date (midnight), not minutes
+    const emailTimestamp = email.date.getTime();
+    const cutoffTimestamp = Date.now() - minutes * 60 * 1000;
+
+    if (emailTimestamp < cutoffTimestamp) {
+      return Response.json({
+        success: false,
+        message: `No recent Netflix verification link found. The latest email is older than ${minutes} minutes.`,
+      });
+    }
+
+    // Parse the email to find Netflix verification link
+    const verificationLink = parseNetflixVerificationLink(email);
+    if (verificationLink) {
+      return Response.json({
+        success: true,
+        url: verificationLink.url,
+        message: 'Update link found successfully.',
+      });
     }
 
     return Response.json({
       success: false,
-      message: `No Netflix verification link found in the last ${minutes} minutes.`,
+      message: 'No valid Netflix verification link found in the email.',
     });
   } catch (error: any) {
     console.error('Error fetching Netflix verification link:', error);
+
+    // Provide specific error messages
+    const errorMessage = error.message || '';
+    if (errorMessage.includes('Authentication failed')) {
+      return Response.json({
+        success: false,
+        message: 'Authentication failed. Please check your credentials.',
+      });
+    } else if (
+      errorMessage.includes('timeout') ||
+      errorMessage.includes('ETIMEDOUT')
+    ) {
+      return Response.json({
+        success: false,
+        message: 'Request timed out. Please try again shortly.',
+      });
+    }
+
     return Response.json({
       success: false,
       message: 'Service is temporarily unavailable. Please try again shortly.',
