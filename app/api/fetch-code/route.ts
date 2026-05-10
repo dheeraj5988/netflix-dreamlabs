@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { fetchEmails } from '@/lib/gmailService';
+import { fetchLatestNetflixEmail } from '@/lib/gmailService';
 import { parseNetflixVerificationLink } from '@/lib/emailParser';
 
 export async function POST(request: NextRequest) {
@@ -26,26 +26,30 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Fetch emails from the last 24 hours
+    // Fetch the latest Netflix email from the last 24 hours
     const twentyFourHoursAgo = new Date();
     twentyFourHoursAgo.setHours(twentyFourHoursAgo.getHours() - 24);
 
-    const emails = await fetchEmails(userEmail, appPassword, twentyFourHoursAgo);
+    const email = await fetchLatestNetflixEmail(userEmail, appPassword, twentyFourHoursAgo);
 
-    // Find Netflix verification link
-    for (const email of emails) {
-      const verificationLink = parseNetflixVerificationLink(email);
-      if (verificationLink) {
-        return NextResponse.json({
-          success: true,
-          code: verificationLink.code,
-          url: verificationLink.url,
-        });
-      }
+    if (!email) {
+      return NextResponse.json(
+        { error: 'No Netflix verification email found in the last 24 hours.' },
+        { status: 404 }
+      );
+    }
+
+    // Parse the email to find Netflix verification link
+    const verificationLink = parseNetflixVerificationLink(email);
+    if (verificationLink) {
+      return NextResponse.json({
+        success: true,
+        url: verificationLink.url,
+      });
     }
 
     return NextResponse.json(
-      { error: 'No Netflix verification email found in the last 24 hours.' },
+      { error: 'No valid Netflix verification link found in the email.' },
       { status: 404 }
     );
   } catch (error) {
