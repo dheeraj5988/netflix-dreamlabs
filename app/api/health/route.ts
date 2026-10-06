@@ -101,6 +101,14 @@ export async function GET() {
     })
   );
 
+  // Online purchase is optional: reported, but it does not decide whether the app is healthy.
+  const ordersProbe = await admin.from('dl_orders').select('order_id', { count: 'exact' }).limit(1);
+  const keysProbe = await admin.from('dl_settings').select('paypur_key, paypur_salt').eq('id', 'default').maybeSingle();
+  const payments = {
+    ordersTable: !ordersProbe.error,
+    gatewayConfigured: !keysProbe.error && Boolean((keysProbe.data as any)?.paypur_key && (keysProbe.data as any)?.paypur_salt),
+  };
+
   const { data: rpcProbe, error: rpcErr } = await admin.rpc('dl_record_tv_login', {
     p_mobile: '0000000000',
     p_code: 'HEALTH',
@@ -118,6 +126,7 @@ export async function GET() {
       storage: ok ? 'Supabase (permanent)' : 'error',
       env,
       tables,
+      payments,
       tvLoginFunction: tvLoginFunction ? 'ok' : rpcErr?.message || 'missing',
       timestamp: new Date().toISOString(),
     },

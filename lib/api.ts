@@ -2,6 +2,7 @@ export interface FetchNetflixLinkResponse {
   success: boolean;
   link?: string;
   message?: string;
+  reason?: string;
   whatsappUrl?: string;
 }
 

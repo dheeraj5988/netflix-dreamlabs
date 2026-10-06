@@ -6,6 +6,8 @@ import {
   listCustomers,
   listTvLoginsThisMonth,
   getSettings,
+  getPaypurSummary,
+  listOrders,
   importCustomers,
   indiaToday,
   indiaMonthStart,
@@ -27,6 +29,16 @@ export const GET = adminRoute(async () => {
     listActivations(2000),
     listTvLoginsThisMonth(),
   ]);
+
+  // Orders and PayPur keys live in the payments SQL; an install that has not run it yet still works.
+  let orders: Awaited<ReturnType<typeof listOrders>> = [];
+  let ordersError: string | null = null;
+  try {
+    orders = await listOrders(500);
+  } catch (err: any) {
+    ordersError = err?.message || 'Could not load orders';
+  }
+  const paypur = await getPaypurSummary();
 
   const historyBySubscriber = new Map<string, typeof activations>();
   for (const a of activations) {
@@ -110,7 +122,17 @@ export const GET = adminRoute(async () => {
   return NextResponse.json({
     ok: true,
     storage,
-    data: { customers: customersOut, netflixCookies: accounts, netflixIds, settings, activationsLog: activations, metrics },
+    data: {
+      customers: customersOut,
+      netflixCookies: accounts,
+      netflixIds,
+      settings,
+      activationsLog: activations,
+      metrics,
+      orders,
+      ordersError,
+      paypur,
+    },
   });
 });
 

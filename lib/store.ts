@@ -766,6 +766,190 @@ export async function getStorageStatus(): Promise<StorageStatus> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// PayPur gateway credentials (dl_settings.paypur_key / paypur_salt)
+// ---------------------------------------------------------------------------
+
+export interface PaypurCredentials {
+  key: string;
+  salt: string;
+}
+
+export interface PaypurSummary {
+  configured: boolean;
+  /** Last 4 characters of the saved key, for the admin to recognise it. The salt is never returned. */
+  keyHint: string;
+  saltSet: boolean;
+  /** Set when the payments SQL has not been run yet. */
+  error?: string;
+}
+
+/** Server-only: the saved Gateway Key and Salt, or null if either is missing. */
+export async function getPaypurCredentials(): Promise<PaypurCredentials | null> {
+  const row: any = must(
+    await db().from('dl_settings').select('paypur_key, paypur_salt').eq('id', 'default').maybeSingle(),
+    'loading payment settings'
+  );
+  const key = String(row?.paypur_key || '').trim();
+  const salt = String(row?.paypur_salt || '').trim();
+  return key && salt ? { key, salt } : null;
+}
+
+export async function getPaypurSummary(): Promise<PaypurSummary> {
+  try {
+    const row: any = must(
+      await db().from('dl_settings').select('paypur_key, paypur_salt').eq('id', 'default').maybeSingle(),
+      'loading payment settings'
+    );
+    const key = String(row?.paypur_key || '').trim();
+    const salt = String(row?.paypur_salt || '').trim();
+    return { configured: Boolean(key && salt), keyHint: key ? key.slice(-4) : '', saltSet: Boolean(salt) };
+  } catch (err: any) {
+    return { configured: false, keyHint: '', saltSet: false, error: err?.message || 'Could not load payment settings' };
+  }
+}
+
+/** Saves the gateway keys. A field that is not given is left as it is; `clear` removes both. */
+export async function savePaypurCredentials(input: { key?: string; salt?: string; clear?: boolean }): Promise<void> {
+  const patch: Record<string, unknown> = {};
+  if (input.clear) {
+    patch.paypur_key = null;
+    patch.paypur_salt = null;
+  } else {
+    if (input.key !== undefined) patch.paypur_key = input.key.trim();
+    if (input.salt !== undefined) patch.paypur_salt = input.salt.trim();
+  }
+  if (Object.keys(patch).length === 0) return;
+  must(await db().from('dl_settings').update(patch).eq('id', 'default'), 'saving payment settings');
+}
+
+// ---------------------------------------------------------------------------
+// Orders (dl_orders): online purchases through PayPur
+// ---------------------------------------------------------------------------
+
+export type OrderStatus = 'created' | 'pending' | 'paid' | 'failed';
+
+export interface Order {
+  orderId: string;
+  mobile: string;
+  customerName: string;
+  customerEmail: string;
+  planId: string;
+  planLabel: string;
+  amount: number;
+  status: OrderStatus;
+  txnId: string | null;
+  gatewayStatus: string | null;
+  notes: string | null;
+  createdAt: string;
+  updatedAt: string;
+  paidAt: string | null;
+}
+
+function toOrder(r: any): Order {
+  return {
+    orderId: r.order_id,
+    mobile: r.mobile,
+    customerName: r.customer_name || '',
+    customerEmail: r.customer_email || '',
+    planId: r.plan_id,
+    planLabel: r.plan_label,
+    amount: Number(r.amount),
+    status: r.status,
+    txnId: r.txn_id,
+    gatewayStatus: r.gateway_status,
+    notes: r.notes,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+    paidAt: r.paid_at,
+  };
+}
+
+export async function createOrder(o: {
+  orderId: string;
+  mobile: string;
+  customerName: string;
+  customerEmail: string;
+  planId: string;
+  planLabel: string;
+  amount: number;
+  ip?: string;
+}): Promise<Order> {
+  const row = must(
+    await db()
+      .from('dl_orders')
+      .insert({
+        order_id: o.orderId,
+        mobile: o.mobile,
+        customer_name: o.customerName,
+        customer_email: o.customerEmail,
+        plan_id: o.planId,
+        plan_label: o.planLabel,
+        amount: o.amount,
+        ip: o.ip || null,
+      })
+      .select('*')
+      .single(),
+    'creating order'
+  );
+  return toOrder(row);
+}
+
+export async function getOrder(orderId: string): Promise<Order | null> {
+  const row = must(await db().from('dl_orders').select('*').eq('order_id', orderId).maybeSingle(), 'loading order');
+  return row ? toOrder(row) : null;
+}
+
+export async function listOrders(limit = 500): Promise<Order[]> {
+  const rows = must(
+    await db().from('dl_orders').select('*').order('created_at', { ascending: false }).limit(limit),
+    'loading orders'
+  );
+  return rows.map(toOrder);
+}
+
+/** Purchase attempts by this number in the last `minutes` (to stop someone spamming the gateway). */
+export async function countRecentOrders(mobile: string, minutes: number): Promise<number> {
+  const since = new Date(Date.now() - minutes * 60 * 1000).toISOString();
+  const res = await db()
+    .from('dl_orders')
+    .select('order_id', { count: 'exact' })
+    .eq('mobile', mobile)
+    .gte('created_at', since)
+    .limit(1);
+  if (res.error) throw new StorageError(`Database error while counting orders: ${res.error.message}`);
+  return res.count ?? 0;
+}
+
+/**
+ * Updates an order. A paid order is never changed by a later failed/pending update.
+ */
+export async function updateOrder(
+  orderId: string,
+  patch: { status?: OrderStatus; txnId?: string | null; gatewayStatus?: string | null; notes?: string | null }
+): Promise<Order | null> {
+  const current = await getOrder(orderId);
+  if (!current) return null;
+  // A paid order is final: a late "failed" / "pending" callback changes nothing, not even the notes.
+  if (current.status === 'paid' && patch.status && patch.status !== 'paid') return current;
+
+  const row: Record<string, unknown> = {};
+  if (patch.status) {
+    row.status = patch.status;
+    if (patch.status === 'paid' && !current.paidAt) row.paid_at = new Date().toISOString();
+  }
+  if (patch.txnId) row.txn_id = patch.txnId;
+  if (patch.gatewayStatus !== undefined) row.gateway_status = patch.gatewayStatus;
+  if (patch.notes !== undefined) row.notes = patch.notes === null ? null : patch.notes.slice(0, 500);
+  if (Object.keys(row).length === 0) return current;
+
+  const updated = must(
+    await db().from('dl_orders').update(row).eq('order_id', orderId).select('*').maybeSingle(),
+    'updating order'
+  );
+  return updated ? toOrder(updated) : null;
+}
+
 /** An error caused by bad input, shown to the user as a 400. */
 export class UserError extends Error {
   constructor(message: string) {

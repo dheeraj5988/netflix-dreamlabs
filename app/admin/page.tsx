@@ -30,9 +30,11 @@ import {
   Database,
   XCircle,
   Mail,
+  ShoppingCart,
 } from "lucide-react"
 import { addMonthsIso, formatDisplayDate, parseSheet, todayIso, type ParsedRow, type SheetParseResult } from "@/lib/validity"
 import { COMPANY_NAME, SUPPORT_WHATSAPP } from "@/lib/support"
+import { getPlan } from "@/lib/plans"
 
 type AccountStatus = "live" | "expiring_soon" | "expired" | "needs_reimport" | "unverified" | "unknown"
 
@@ -102,6 +104,29 @@ interface Metrics {
   idsMissingGmail: number
 }
 
+interface Order {
+  orderId: string
+  mobile: string
+  customerName: string
+  customerEmail: string
+  planId: string
+  planLabel: string
+  amount: number
+  status: "created" | "pending" | "paid" | "failed"
+  txnId: string | null
+  gatewayStatus: string | null
+  notes: string | null
+  createdAt: string
+  paidAt: string | null
+}
+
+interface PaypurSummary {
+  configured: boolean
+  keyHint: string
+  saltSet: boolean
+  error?: string
+}
+
 const TOKEN_KEY = "dreamlabs_admin_token"
 
 const statusLabel = (s: AccountStatus | null) =>
@@ -131,7 +156,7 @@ export default function AdminPage() {
   const [passwordInput, setPasswordInput] = useState("")
   const [loginError, setLoginError] = useState("")
   const [loading, setLoading] = useState(true)
-  const [activeTab, setActiveTab] = useState<"dashboard" | "customers" | "ids" | "cookies" | "logs" | "settings">("dashboard")
+  const [activeTab, setActiveTab] = useState<"dashboard" | "customers" | "orders" | "ids" | "cookies" | "logs" | "settings">("dashboard")
 
   // Data states
   const [customers, setCustomers] = useState<Customer[]>([])
@@ -140,6 +165,16 @@ export default function AdminPage() {
   const [settings, setSettings] = useState<AppSettings | null>(null)
   const [activationsLog, setActivationsLog] = useState<any[]>([])
   const [metrics, setMetrics] = useState<Metrics | null>(null)
+  const [orders, setOrders] = useState<Order[]>([])
+  const [ordersError, setOrdersError] = useState<string | null>(null)
+  const [paypur, setPaypur] = useState<PaypurSummary | null>(null)
+  const [orderBusy, setOrderBusy] = useState<string | null>(null)
+  const [orderMsg, setOrderMsg] = useState("")
+
+  // PayPur settings form
+  const [paypurKeyInput, setPaypurKeyInput] = useState("")
+  const [paypurSaltInput, setPaypurSaltInput] = useState("")
+  const [paypurMsg, setPaypurMsg] = useState<{ ok: boolean; text: string } | null>(null)
 
   // Search & Filter
   const [searchQuery, setSearchQuery] = useState("")
@@ -254,6 +289,9 @@ export default function AdminPage() {
         setSettings(data.data.settings || null)
         setActivationsLog(data.data.activationsLog || [])
         setMetrics(data.data.metrics || null)
+        setOrders(data.data.orders || [])
+        setOrdersError(data.data.ordersError || null)
+        setPaypur(data.data.paypur || null)
         if (data.storage) {
           setStorageInfo(data.storage)
         }
@@ -630,6 +668,90 @@ export default function AdminPage() {
     }
   }
 
+  // PayPur Gateway Key / Salt
+  const handleSavePaypur = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setPaypurMsg(null)
+    try {
+      const res = await fetch("/api/admin/settings", {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ paypur: { key: paypurKeyInput, salt: paypurSaltInput } }),
+      })
+      const data = await res.json()
+      if (res.ok && data.ok) {
+        setPaypur(data.paypur)
+        setPaypurKeyInput("")
+        setPaypurSaltInput("")
+        setPaypurMsg({
+          ok: true,
+          text: data.paypur?.configured ? "Saved. Online purchase is ON." : "Saved. Add the other value to turn online purchase on.",
+        })
+      } else {
+        setPaypurMsg({ ok: false, text: data.message || "Failed to save" })
+      }
+    } catch {
+      setPaypurMsg({ ok: false, text: "Network error" })
+    }
+  }
+
+  const handleClearPaypur = async () => {
+    if (!confirm("Remove the saved PayPur key and salt? Customers will no longer be able to pay online.")) return
+    setPaypurMsg(null)
+    try {
+      const res = await fetch("/api/admin/settings", {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ paypur: { clear: true } }),
+      })
+      const data = await res.json()
+      if (res.ok && data.ok) {
+        setPaypur(data.paypur)
+        setPaypurMsg({ ok: true, text: "Keys removed. Online purchase is OFF." })
+      } else {
+        setPaypurMsg({ ok: false, text: data.message || "Failed to remove" })
+      }
+    } catch {
+      setPaypurMsg({ ok: false, text: "Network error" })
+    }
+  }
+
+  // Orders
+  const handleOrderAction = async (o: Order, action: "refresh" | "mark_paid") => {
+    if (action === "mark_paid" && !confirm(`Mark order ${o.orderId} (₹${o.amount}) as paid? Only do this after you saw the payment in PayPur.`)) return
+    setOrderBusy(o.orderId)
+    setOrderMsg("")
+    try {
+      const res = await fetch("/api/admin/orders", {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ orderId: o.orderId, action }),
+      })
+      const data = await res.json()
+      setOrderMsg(data.message || (res.ok ? "Done" : "Failed"))
+      if (res.ok && data.ok) refresh()
+    } catch {
+      setOrderMsg("Network error")
+    } finally {
+      setOrderBusy(null)
+    }
+  }
+
+  // A paid order: open the customer form ready to activate (new customer, or extend an existing one).
+  const activateFromOrder = (o: Order) => {
+    const months = getPlan(o.planId)?.months ?? 1
+    const existing = customers.find((c) => c.mobile === o.mobile)
+    const base = existing?.expiryDate && existing.expiryDate > todayIso() ? existing.expiryDate : todayIso()
+    setEditingCustomer(existing || null)
+    setCustMobile(o.mobile)
+    setCustEmail(existing?.netflixEmail || "")
+    setCustExpDate(addMonthsIso(base, months))
+    setCustBlocked(existing?.isBlocked ?? false)
+    setFormError("")
+    setActiveTab("customers")
+    setShowAddCustomerModal(true)
+  }
+
   // Database Backup / Export JSON
   const handleDownloadBackup = () => {
     const fullBackup = {
@@ -722,6 +844,7 @@ export default function AdminPage() {
   const tabs = [
     { id: "dashboard", label: "Dashboard", icon: <Activity className="w-3.5 h-3.5" /> },
     { id: "customers", label: `Customers (${customers.length})`, icon: <Users className="w-3.5 h-3.5" /> },
+    { id: "orders", label: `Orders (${orders.length})`, icon: <ShoppingCart className="w-3.5 h-3.5" /> },
     { id: "ids", label: `Netflix IDs (${netflixIds.length})`, icon: <Mail className="w-3.5 h-3.5" /> },
     { id: "cookies", label: `Cookie Vault (${netflixCookies.length})`, icon: <Cookie className="w-3.5 h-3.5" /> },
     { id: "logs", label: "Activity Logs", icon: <Tv className="w-3.5 h-3.5" /> },
@@ -1133,6 +1256,158 @@ export default function AdminPage() {
                               </tr>
                             )
                           })
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </Card>
+              </div>
+            )}
+
+            {/* ORDERS TAB */}
+            {!storageError && activeTab === "orders" && (
+              <div className="space-y-4 animate-fade-in">
+                <div className="flex items-center justify-between flex-wrap gap-3">
+                  <div>
+                    <h2 className="text-base font-bold text-white">Online Orders</h2>
+                    <p className="text-netflix-muted text-xs max-w-2xl">
+                      Purchases made on the Buy Plan tab. After paying, the customer sends the order details on WhatsApp: use{" "}
+                      <span className="text-netflix-light">Activate</span> to give them their Netflix ID and expiry.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-4 text-xs">
+                    <span className="text-netflix-muted">
+                      Paid:{" "}
+                      <span className="text-green-400 font-semibold">{orders.filter((o) => o.status === "paid").length}</span>
+                    </span>
+                    <span className="text-netflix-muted">
+                      Revenue:{" "}
+                      <span className="text-white font-semibold">
+                        ₹{orders.filter((o) => o.status === "paid").reduce((n, o) => n + o.amount, 0)}
+                      </span>
+                    </span>
+                  </div>
+                </div>
+
+                {!paypur?.configured && (
+                  <div className="bg-amber-950/40 border border-amber-700/50 rounded-xl p-3 text-xs text-amber-200 flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                    <p>
+                      Online purchase is OFF. Save the PayPur Gateway Key and Gateway Salt in <b>Settings</b> to turn it on.
+                    </p>
+                  </div>
+                )}
+                {ordersError && (
+                  <div className="bg-red-950/50 border border-red-700/60 rounded-xl p-3 text-xs text-red-200 flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                    <p>
+                      Orders could not be loaded: <span className="font-mono">{ordersError}</span>. Run{" "}
+                      <span className="font-mono">03_dreamlabs_payments.sql</span> in the Supabase SQL Editor.
+                    </p>
+                  </div>
+                )}
+                {orderMsg && <p className="text-xs text-yellow-400">{orderMsg}</p>}
+
+                <Card className="bg-netflix-card border-netflix-border rounded-xl overflow-hidden">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-netflix-dark/80 text-netflix-muted uppercase tracking-wider text-[10px] border-b border-netflix-border">
+                        <tr>
+                          <th className="py-3 px-4">Date</th>
+                          <th className="py-3 px-4">Customer</th>
+                          <th className="py-3 px-4">Plan</th>
+                          <th className="py-3 px-4">Order / Txn</th>
+                          <th className="py-3 px-4">Status</th>
+                          <th className="py-3 px-4 text-right">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-netflix-border/50 text-netflix-light">
+                        {orders.length === 0 ? (
+                          <tr>
+                            <td colSpan={6} className="py-8 text-center text-netflix-muted">
+                              No orders yet
+                            </td>
+                          </tr>
+                        ) : (
+                          orders.map((o) => (
+                            <tr key={o.orderId} className="hover:bg-netflix-input/30 align-top">
+                              <td className="py-3 px-4 text-netflix-muted whitespace-nowrap">
+                                {new Date(o.createdAt).toLocaleString("en-IN")}
+                              </td>
+                              <td className="py-3 px-4">
+                                <p className="font-mono font-medium text-white">+91 {o.mobile}</p>
+                                <p className="text-netflix-muted text-[11px]">{o.customerName}</p>
+                                <p className="text-netflix-muted text-[11px] break-all">{o.customerEmail}</p>
+                              </td>
+                              <td className="py-3 px-4 whitespace-nowrap">
+                                <p className="text-white font-medium">{o.planLabel}</p>
+                                <p className="text-netflix-muted text-[11px]">₹{o.amount}</p>
+                              </td>
+                              <td className="py-3 px-4 font-mono text-[11px]">
+                                <p className="text-netflix-light break-all">{o.orderId}</p>
+                                <p className="text-netflix-muted break-all">{o.txnId || "no txn id yet"}</p>
+                              </td>
+                              <td className="py-3 px-4 max-w-[220px]">
+                                <span
+                                  className={`px-2 py-0.5 rounded text-[11px] font-semibold ${
+                                    o.status === "paid"
+                                      ? "bg-green-500/20 text-green-400"
+                                      : o.status === "failed"
+                                        ? "bg-red-500/20 text-red-400"
+                                        : "bg-yellow-500/20 text-yellow-400"
+                                  }`}
+                                >
+                                  {o.status === "paid" ? "Paid" : o.status === "failed" ? "Failed" : "Pending"}
+                                </span>
+                                {o.gatewayStatus && <p className="text-netflix-muted text-[10px] mt-1">PayPur: {o.gatewayStatus}</p>}
+                                {o.notes && <p className="text-netflix-muted text-[10px] break-words">{o.notes}</p>}
+                              </td>
+                              <td className="py-3 px-4 text-right">
+                                <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                                  {o.status === "paid" ? (
+                                    <Button
+                                      onClick={() => activateFromOrder(o)}
+                                      size="sm"
+                                      className="h-7 text-[11px] px-2 bg-netflix-red hover:bg-netflix-red-hover text-white cursor-pointer"
+                                    >
+                                      Activate
+                                    </Button>
+                                  ) : (
+                                    <>
+                                      <Button
+                                        onClick={() => handleOrderAction(o, "refresh")}
+                                        disabled={orderBusy === o.orderId}
+                                        size="sm"
+                                        variant="outline"
+                                        className="h-7 text-[11px] px-2 border-netflix-border text-netflix-light hover:text-white bg-transparent cursor-pointer"
+                                        title="Ask PayPur for this transaction's status"
+                                      >
+                                        {orderBusy === o.orderId ? <Loader2 className="w-3 h-3 animate-spin" /> : "Check status"}
+                                      </Button>
+                                      <Button
+                                        onClick={() => handleOrderAction(o, "mark_paid")}
+                                        disabled={orderBusy === o.orderId}
+                                        size="sm"
+                                        variant="outline"
+                                        className="h-7 text-[11px] px-2 border-netflix-border text-netflix-muted hover:text-green-400 bg-transparent cursor-pointer"
+                                        title="Use only after you saw the payment in PayPur"
+                                      >
+                                        Mark paid
+                                      </Button>
+                                    </>
+                                  )}
+                                  <a
+                                    href={`https://wa.me/91${o.mobile}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="h-7 px-2 inline-flex items-center rounded-md border border-netflix-border text-[11px] text-netflix-light hover:text-white"
+                                  >
+                                    WhatsApp
+                                  </a>
+                                </div>
+                              </td>
+                            </tr>
+                          ))
                         )}
                       </tbody>
                     </table>
@@ -1584,6 +1859,89 @@ export default function AdminPage() {
                     <Button type="submit" className="bg-netflix-red hover:bg-netflix-red-hover text-white text-xs h-10 cursor-pointer">
                       Save Settings
                     </Button>
+                  </form>
+                </Card>
+
+                <Card className="bg-netflix-card border-netflix-border p-6 rounded-xl space-y-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h2 className="text-base font-bold text-white">Online Purchase (PayPur)</h2>
+                      <p className="text-netflix-muted text-xs leading-relaxed">
+                        Customers can buy 3 Months (₹449), 6 Months (₹798) or 1 Year (₹1498) on the Buy Plan tab, all 4K UHD with 1
+                        Device. Paste the keys from PayPur &gt; API &amp; SDK &gt; Credentials.
+                      </p>
+                    </div>
+                    {paypur?.configured ? (
+                      <span className="bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[11px] px-2.5 py-0.5 rounded font-semibold shrink-0">
+                        ON
+                      </span>
+                    ) : (
+                      <span className="bg-red-500/20 text-red-300 border border-red-500/40 text-[11px] px-2.5 py-0.5 rounded font-semibold shrink-0">
+                        OFF
+                      </span>
+                    )}
+                  </div>
+
+                  {paypur?.error && (
+                    <p className="text-[11px] text-red-300">
+                      Could not read the saved keys ({paypur.error}). Run <span className="font-mono">03_dreamlabs_payments.sql</span> first.
+                    </p>
+                  )}
+
+                  <form onSubmit={handleSavePaypur} className="space-y-3.5">
+                    <div className="space-y-1">
+                      <label className="text-xs font-medium text-netflix-light block">Paypur Gateway Key</label>
+                      <Input
+                        type="password"
+                        autoComplete="off"
+                        value={paypurKeyInput}
+                        onChange={(e) => setPaypurKeyInput(e.target.value)}
+                        placeholder={paypur?.keyHint ? `Saved (ends with ${paypur.keyHint}). Enter a new one to replace.` : "API key (X-PAYPUR-KEY)"}
+                        className="bg-netflix-input border-netflix-border text-white text-xs h-10 font-mono"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs font-medium text-netflix-light block">Paypur Gateway Salt</label>
+                      <Input
+                        type="password"
+                        autoComplete="off"
+                        value={paypurSaltInput}
+                        onChange={(e) => setPaypurSaltInput(e.target.value)}
+                        placeholder={paypur?.saltSet ? "Saved. Enter a new one to replace." : "Signing secret"}
+                        className="bg-netflix-input border-netflix-border text-white text-xs h-10 font-mono"
+                      />
+                      <p className="text-[11px] text-netflix-muted">
+                        The salt is used only on the server to sign payments and check PayPur&apos;s replies. It is never shown again.
+                      </p>
+                    </div>
+
+                    <div className="bg-netflix-dark/60 border border-netflix-border/50 rounded-lg p-3 text-[11px] text-netflix-muted space-y-1">
+                      <p className="text-netflix-light font-medium">Return URLs this site gives PayPur:</p>
+                      <p className="font-mono break-all">
+                        {typeof window !== "undefined" ? window.location.origin : ""}/api/paypur/callback/success
+                      </p>
+                      <p className="font-mono break-all">
+                        {typeof window !== "undefined" ? window.location.origin : ""}/api/paypur/callback/failure
+                      </p>
+                    </div>
+
+                    {paypurMsg && <p className={`text-xs font-medium ${paypurMsg.ok ? "text-green-400" : "text-red-400"}`}>{paypurMsg.text}</p>}
+
+                    <div className="flex gap-2">
+                      <Button type="submit" className="bg-netflix-red hover:bg-netflix-red-hover text-white text-xs h-10 cursor-pointer">
+                        Save PayPur Keys
+                      </Button>
+                      {(paypur?.keyHint || paypur?.saltSet) && (
+                        <Button
+                          type="button"
+                          onClick={handleClearPaypur}
+                          variant="outline"
+                          className="border-netflix-border text-netflix-muted hover:text-red-400 text-xs h-10 bg-transparent cursor-pointer"
+                        >
+                          Remove keys
+                        </Button>
+                      )}
+                    </div>
                   </form>
                 </Card>
 

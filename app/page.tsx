@@ -12,6 +12,7 @@ import {
   MessageCircle,
   RotateCcw,
   ShieldCheck,
+  ShoppingCart,
   Tv,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -19,8 +20,9 @@ import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { fetchLatestNetflixLink } from '@/lib/api';
 import { COMPANY_NAME, whatsappLink } from '@/lib/support';
+import { PLANS, PLAN_DESCRIPTION, getPlan } from '@/lib/plans';
 
-type FlowTab = 'tv_login' | 'household';
+type FlowTab = 'tv_login' | 'household' | 'buy';
 type PageStatus = 'idle' | 'loading' | 'tv_success' | 'household_success' | 'error';
 
 interface CustomerQuota {
@@ -73,7 +75,13 @@ export default function NetflixHouseholdUpdater() {
   const [quota, setQuota] = useState<CustomerQuota | null>(null);
 
   const [errorMessage, setErrorMessage] = useState('');
+  const [errorReason, setErrorReason] = useState('');
   const [whatsAppUrl, setWhatsAppUrl] = useState('');
+
+  // Buy plan
+  const [planId, setPlanId] = useState(PLANS[0].id);
+  const [buyerName, setBuyerName] = useState('');
+  const [buyerEmail, setBuyerEmail] = useState('');
 
   useEffect(() => {
     setIsClient(true);
@@ -110,13 +118,23 @@ export default function NetflixHouseholdUpdater() {
     setTvCode('');
     setNetflixLink(null);
     setErrorMessage('');
+    setErrorReason('');
     setWhatsAppUrl('');
   };
 
-  const showError = (message: string, url?: string) => {
+  const showError = (message: string, url?: string, reason?: string) => {
     setErrorMessage(message);
+    setErrorReason(reason || '');
     setWhatsAppUrl(url || whatsappLink(mobileNumber, message));
     setStatus('error');
+  };
+
+  // No plan, or an expired one: the customer can buy right here.
+  const canBuyFromError = errorReason === 'not_found' || errorReason === 'expired';
+
+  const openBuyTab = () => {
+    handleReset();
+    setActiveTab('buy');
   };
 
   // 1. TV login: the server confirms the code on Netflix as the customer's own account
@@ -139,7 +157,7 @@ export default function NetflixHouseholdUpdater() {
       const data = await res.json();
 
       if (!res.ok || !data.success) {
-        showError(data.message || 'Failed to activate TV login', data.whatsappUrl);
+        showError(data.message || 'Failed to activate TV login', data.whatsappUrl, data.reason);
         return;
       }
 
@@ -167,7 +185,37 @@ export default function NetflixHouseholdUpdater() {
       setNetflixLink(response.link);
       setStatus('household_success');
     } else {
-      showError(response.message || 'Failed to fetch Netflix update link', response.whatsappUrl);
+      showError(response.message || 'Failed to fetch Netflix update link', response.whatsappUrl, response.reason);
+    }
+  };
+
+  // 3. Buy a plan: the server creates the order and returns a PayPur payment link.
+  const selectedPlan = getPlan(planId) ?? PLANS[0];
+
+  const handleBuySubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (mobileNumber.length !== 10 || buyerName.trim().length < 2 || !buyerEmail.includes('@')) return;
+
+    setSavedMobile(mobileNumber);
+    setIsSaved(true);
+    setStatus('loading');
+    setLoadingText('Starting your secure payment...');
+    setErrorMessage('');
+
+    try {
+      const res = await fetch('/api/paypur/init', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plan: planId, name: buyerName, email: buyerEmail, mobile: mobileNumber }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success || !data.payUrl) {
+        showError(data?.message || 'Could not start the payment. Please try again.', data?.whatsappUrl);
+        return;
+      }
+      window.location.href = data.payUrl;
+    } catch (err: any) {
+      showError(err.message || 'Network error while starting the payment');
     }
   };
 
@@ -222,35 +270,30 @@ export default function NetflixHouseholdUpdater() {
 
         <Card className="bg-netflix-card border-netflix-border backdrop-blur-sm shadow-2xl p-6 md:p-8 rounded-xl">
           {/* TAB SWITCHER */}
-          <div className="grid grid-cols-2 p-1 bg-netflix-dark/80 rounded-xl border border-netflix-border mb-6">
-            <button
-              type="button"
-              onClick={() => {
-                setActiveTab('household');
-                handleReset();
-              }}
-              className={`py-2.5 px-3 rounded-lg text-xs font-semibold flex items-center justify-center gap-2 transition-all cursor-pointer ${
-                activeTab === 'household'
-                  ? 'bg-netflix-red text-white shadow-md shadow-netflix-red/30'
-                  : 'text-netflix-gray hover:text-white'
-              }`}
-            >
-              <ExternalLink className="w-4 h-4" /> Update Household
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setActiveTab('tv_login');
-                handleReset();
-              }}
-              className={`py-2.5 px-3 rounded-lg text-xs font-semibold flex items-center justify-center gap-2 transition-all cursor-pointer ${
-                activeTab === 'tv_login'
-                  ? 'bg-netflix-red text-white shadow-md shadow-netflix-red/30'
-                  : 'text-netflix-gray hover:text-white'
-              }`}
-            >
-              <Tv className="w-4 h-4" /> TV Login
-            </button>
+          <div className="grid grid-cols-3 p-1 bg-netflix-dark/80 rounded-xl border border-netflix-border mb-6 gap-1">
+            {(
+              [
+                ['household', 'Household', <ExternalLink key="h" className="w-4 h-4 shrink-0" />],
+                ['tv_login', 'TV Login', <Tv key="t" className="w-4 h-4 shrink-0" />],
+                ['buy', 'Buy Plan', <ShoppingCart key="b" className="w-4 h-4 shrink-0" />],
+              ] as const
+            ).map(([id, label, icon]) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => {
+                  setActiveTab(id);
+                  handleReset();
+                }}
+                className={`py-2.5 px-1.5 rounded-lg text-[11px] sm:text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                  activeTab === id
+                    ? 'bg-netflix-red text-white shadow-md shadow-netflix-red/30'
+                    : 'text-netflix-gray hover:text-white'
+                }`}
+              >
+                {icon} <span className="truncate">{label}</span>
+              </button>
+            ))}
           </div>
 
           {/* LOADING STATE */}
@@ -270,6 +313,22 @@ export default function NetflixHouseholdUpdater() {
                 <h3 className="text-xl font-bold text-white">Action Could Not Be Completed</h3>
                 <p className="text-netflix-gray text-sm leading-relaxed">{errorMessage}</p>
               </div>
+
+              {canBuyFromError && (
+                <div className="bg-netflix-red/10 border border-netflix-red/40 rounded-xl p-4 space-y-3 text-center">
+                  <p className="text-white text-sm font-semibold">You can buy a subscription directly</p>
+                  <p className="text-netflix-gray text-xs">
+                    Pay by UPI in a minute, then send your order details on WhatsApp and we activate your Netflix.
+                  </p>
+                  <Button
+                    onClick={openBuyTab}
+                    className="w-full bg-netflix-red hover:bg-netflix-red-hover text-white font-semibold h-11 cursor-pointer flex items-center justify-center gap-2"
+                  >
+                    <ShoppingCart className="w-4 h-4" />
+                    Buy Subscription
+                  </Button>
+                </div>
+              )}
 
               <a
                 href={whatsAppUrl || whatsappLink(mobileNumber, errorMessage)}
@@ -471,6 +530,102 @@ export default function NetflixHouseholdUpdater() {
                     Click <strong className="text-netflix-light">&ldquo;Activate TV Login&rdquo;</strong> to pair your device.
                   </li>
                   <li>Your TV will sign in automatically &mdash; choose your profile and enjoy streaming!</li>
+                </ol>
+              </div>
+            </form>
+          )}
+
+          {/* BUY FORM */}
+          {status === 'idle' && activeTab === 'buy' && (
+            <form onSubmit={handleBuySubmit} className="space-y-5 animate-fade-in">
+              <div className="space-y-1.5">
+                <label htmlFor="plan" className="text-xs font-medium text-netflix-light block">
+                  Choose your plan
+                </label>
+                <select
+                  id="plan"
+                  value={planId}
+                  onChange={(e) => setPlanId(e.target.value)}
+                  className="w-full h-12 rounded-md bg-netflix-input border border-netflix-border text-white px-3 text-base focus:outline-none focus:ring-2 focus:ring-netflix-red cursor-pointer"
+                >
+                  {PLANS.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.label} &mdash; ₹{p.price}
+                    </option>
+                  ))}
+                </select>
+                <div className="flex items-center justify-between bg-netflix-dark/60 border border-netflix-border/80 rounded-xl px-4 py-3">
+                  <div>
+                    <p className="text-white text-sm font-semibold">Netflix &bull; {selectedPlan.label}</p>
+                    <p className="text-netflix-muted text-[11px]">{PLAN_DESCRIPTION}</p>
+                  </div>
+                  <p className="text-netflix-red text-2xl font-bold">₹{selectedPlan.price}</p>
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <label htmlFor="buyer-name" className="text-xs font-medium text-netflix-light block">
+                  Your Name
+                </label>
+                <Input
+                  id="buyer-name"
+                  type="text"
+                  autoComplete="name"
+                  placeholder="Full name"
+                  value={buyerName}
+                  onChange={(e) => setBuyerName(e.target.value)}
+                  className="bg-netflix-input border-netflix-border text-white placeholder:text-netflix-muted focus:ring-netflix-red focus:border-netflix-red h-12 text-base"
+                  maxLength={60}
+                  required
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between text-xs">
+                  <label htmlFor="buy-mobile" className="font-medium text-netflix-light">
+                    Mobile Number
+                  </label>
+                  {savedBadge}
+                </div>
+                {mobileInput('buy-mobile')}
+              </div>
+
+              <div className="space-y-1.5">
+                <label htmlFor="buyer-email" className="text-xs font-medium text-netflix-light block">
+                  Email
+                </label>
+                <Input
+                  id="buyer-email"
+                  type="email"
+                  autoComplete="email"
+                  placeholder="you@example.com"
+                  value={buyerEmail}
+                  onChange={(e) => setBuyerEmail(e.target.value.trim())}
+                  className="bg-netflix-input border-netflix-border text-white placeholder:text-netflix-muted focus:ring-netflix-red focus:border-netflix-red h-12 text-base"
+                  required
+                />
+              </div>
+
+              <Button
+                type="submit"
+                disabled={mobileNumber.length !== 10 || buyerName.trim().length < 2 || !buyerEmail.includes('@')}
+                className="w-full bg-netflix-red hover:bg-netflix-red-hover text-white font-semibold h-12 text-base rounded-lg transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-netflix-red/50 flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <ShoppingCart className="w-5 h-5" />
+                Pay ₹{selectedPlan.price} with UPI
+              </Button>
+
+              <div className="bg-netflix-dark/60 border border-netflix-border/80 rounded-xl p-4 text-xs space-y-2">
+                <p className="font-semibold text-white flex items-center gap-1.5 text-xs">
+                  <ShieldCheck className="w-4 h-4 text-green-400" /> How buying works:
+                </p>
+                <ol className="text-netflix-muted space-y-1.5 list-decimal list-inside leading-relaxed text-[11px]">
+                  <li>Choose a plan and pay securely by UPI.</li>
+                  <li>
+                    After payment you are taken to <strong className="text-netflix-light">WhatsApp</strong> to send us your order
+                    details.
+                  </li>
+                  <li>We set up your Netflix and you can use Update Household and TV Login here.</li>
                 </ol>
               </div>
             </form>
