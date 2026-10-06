@@ -1,8 +1,11 @@
 import 'server-only';
 import { BrowserCookie } from './netflix-cookies';
 import { db, must, StorageError } from './db';
-import { aliasKey, isValidEmail, normalizeEmail } from './emails';
+import { aliasKey, isValidEmail, mailboxKey, normalizeEmail } from './emails';
 import { normalizeMobileNumber } from './validity';
+import { openSecret, sealSecret, SecretError } from './secrets';
+import { DEFAULT_PLANS, Plan, plansFromRow } from './plans';
+import { DEFAULT_BRAND } from './support';
 
 /**
  * Supabase-backed storage. Supabase is the only source of truth: there is no
@@ -67,6 +70,11 @@ export interface AppSettings {
   supportWhatsapp: string;
   maxUpdatesPerMonth: number;
   logRetentionDays: number;
+  /** Public https URL of the site, used for PayPur's return URLs (empty = the request's host). */
+  siteUrl: string;
+  /** How far back the household link looks for Netflix's email. */
+  householdLookbackMinutes: number;
+  plans: Plan[];
 }
 
 // ---------------------------------------------------------------------------
@@ -691,11 +699,45 @@ export async function getSettings(): Promise<AppSettings> {
   );
   if (!row) throw new StorageError('Settings row is missing. Run the Supabase migration.');
   return {
-    companyName: row.company_name,
-    supportWhatsapp: row.support_whatsapp,
+    companyName: row.company_name || DEFAULT_BRAND.companyName,
+    supportWhatsapp: row.support_whatsapp || DEFAULT_BRAND.supportWhatsapp,
     maxUpdatesPerMonth: row.max_tv_logins_per_month,
     logRetentionDays: row.log_retention_days,
+    // These columns only exist once the settings SQL has been run: defaults until then.
+    siteUrl: row.site_url || '',
+    householdLookbackMinutes: row.household_lookback_minutes || 30,
+    plans: plansFromRow(row.plans),
   };
+}
+
+// Public pages and error messages read the settings on every request. Each server
+// instance keeps them for a few seconds; saving in the admin panel clears this
+// instance's copy at once and other instances pick the change up within the TTL.
+const SETTINGS_TTL_MS = 10_000;
+let settingsCache: { at: number; value: AppSettings } | null = null;
+
+export function invalidateSettingsCache() {
+  settingsCache = null;
+}
+
+/** getSettings() with a short cache. Never throws: if the database cannot be read it returns the defaults. */
+export async function getSettingsCached(): Promise<AppSettings> {
+  if (settingsCache && Date.now() - settingsCache.at < SETTINGS_TTL_MS) return settingsCache.value;
+  try {
+    const value = await getSettings();
+    settingsCache = { at: Date.now(), value };
+    return value;
+  } catch {
+    return {
+      companyName: DEFAULT_BRAND.companyName,
+      supportWhatsapp: DEFAULT_BRAND.supportWhatsapp,
+      maxUpdatesPerMonth: 2,
+      logRetentionDays: 180,
+      siteUrl: '',
+      householdLookbackMinutes: 30,
+      plans: DEFAULT_PLANS,
+    };
+  }
 }
 
 export async function saveSettings(s: Partial<AppSettings>): Promise<AppSettings> {
@@ -704,7 +746,19 @@ export async function saveSettings(s: Partial<AppSettings>): Promise<AppSettings
   if (s.supportWhatsapp !== undefined) patch.support_whatsapp = s.supportWhatsapp;
   if (s.maxUpdatesPerMonth !== undefined) patch.max_tv_logins_per_month = s.maxUpdatesPerMonth;
   if (s.logRetentionDays !== undefined) patch.log_retention_days = s.logRetentionDays;
-  must(await db().from('dl_settings').update(patch).eq('id', 'default'), 'saving settings');
+  if (s.siteUrl !== undefined) patch.site_url = s.siteUrl || null;
+  if (s.householdLookbackMinutes !== undefined) patch.household_lookback_minutes = s.householdLookbackMinutes;
+  if (s.plans !== undefined) patch.plans = s.plans;
+  const res = await db().from('dl_settings').update(patch).eq('id', 'default');
+  if (res.error) {
+    const missing = /column .* does not exist|schema cache/i.test(res.error.message);
+    throw new StorageError(
+      missing
+        ? 'These settings need the latest SQL: run 04_dreamlabs_panel_settings.sql in the Supabase SQL Editor.'
+        : `Database error while saving settings: ${res.error.message}`
+    );
+  }
+  invalidateSettingsCache();
   return getSettings();
 }
 
@@ -790,9 +844,15 @@ export async function getPaypurCredentials(): Promise<PaypurCredentials | null> 
     await db().from('dl_settings').select('paypur_key, paypur_salt').eq('id', 'default').maybeSingle(),
     'loading payment settings'
   );
-  const key = String(row?.paypur_key || '').trim();
-  const salt = String(row?.paypur_salt || '').trim();
-  return key && salt ? { key, salt } : null;
+  if (!row?.paypur_key || !row?.paypur_salt) return null;
+  try {
+    const key = openSecret(row.paypur_key).trim();
+    const salt = openSecret(row.paypur_salt).trim();
+    return key && salt ? { key, salt } : null;
+  } catch (err) {
+    if (err instanceof SecretError) throw new StorageError(`The saved PayPur keys cannot be read: ${err.message}`);
+    throw err;
+  }
 }
 
 export async function getPaypurSummary(): Promise<PaypurSummary> {
@@ -801,9 +861,18 @@ export async function getPaypurSummary(): Promise<PaypurSummary> {
       await db().from('dl_settings').select('paypur_key, paypur_salt').eq('id', 'default').maybeSingle(),
       'loading payment settings'
     );
-    const key = String(row?.paypur_key || '').trim();
-    const salt = String(row?.paypur_salt || '').trim();
-    return { configured: Boolean(key && salt), keyHint: key ? key.slice(-4) : '', saltSet: Boolean(salt) };
+    const keySet = Boolean(row?.paypur_key);
+    const saltSet = Boolean(row?.paypur_salt);
+    let keyHint = '';
+    let error: string | undefined;
+    if (keySet) {
+      try {
+        keyHint = openSecret(row.paypur_key).trim().slice(-4);
+      } catch (err: any) {
+        error = err?.message;
+      }
+    }
+    return { configured: keySet && saltSet && !error, keyHint, saltSet, error };
   } catch (err: any) {
     return { configured: false, keyHint: '', saltSet: false, error: err?.message || 'Could not load payment settings' };
   }
@@ -816,8 +885,8 @@ export async function savePaypurCredentials(input: { key?: string; salt?: string
     patch.paypur_key = null;
     patch.paypur_salt = null;
   } else {
-    if (input.key !== undefined) patch.paypur_key = input.key.trim();
-    if (input.salt !== undefined) patch.paypur_salt = input.salt.trim();
+    if (input.key !== undefined) patch.paypur_key = sealSecret(input.key.trim());
+    if (input.salt !== undefined) patch.paypur_salt = sealSecret(input.salt.trim());
   }
   if (Object.keys(patch).length === 0) return;
   must(await db().from('dl_settings').update(patch).eq('id', 'default'), 'saving payment settings');
@@ -836,6 +905,8 @@ export interface Order {
   customerEmail: string;
   planId: string;
   planLabel: string;
+  /** Duration of the plan when it was bought; null for orders from before this was recorded. */
+  planMonths: number | null;
   amount: number;
   status: OrderStatus;
   txnId: string | null;
@@ -854,6 +925,7 @@ function toOrder(r: any): Order {
     customerEmail: r.customer_email || '',
     planId: r.plan_id,
     planLabel: r.plan_label,
+    planMonths: r.plan_months ?? null,
     amount: Number(r.amount),
     status: r.status,
     txnId: r.txn_id,
@@ -872,27 +944,28 @@ export async function createOrder(o: {
   customerEmail: string;
   planId: string;
   planLabel: string;
+  planMonths: number;
   amount: number;
   ip?: string;
 }): Promise<Order> {
-  const row = must(
-    await db()
-      .from('dl_orders')
-      .insert({
-        order_id: o.orderId,
-        mobile: o.mobile,
-        customer_name: o.customerName,
-        customer_email: o.customerEmail,
-        plan_id: o.planId,
-        plan_label: o.planLabel,
-        amount: o.amount,
-        ip: o.ip || null,
-      })
-      .select('*')
-      .single(),
-    'creating order'
-  );
-  return toOrder(row);
+  const row: Record<string, unknown> = {
+    order_id: o.orderId,
+    mobile: o.mobile,
+    customer_name: o.customerName,
+    customer_email: o.customerEmail,
+    plan_id: o.planId,
+    plan_label: o.planLabel,
+    plan_months: o.planMonths,
+    amount: o.amount,
+    ip: o.ip || null,
+  };
+  let res = await db().from('dl_orders').insert(row).select('*').single();
+  // plan_months comes with the panel-settings SQL: until that is run, orders are still taken without it.
+  if (res.error && /plan_months/.test(res.error.message)) {
+    delete row.plan_months;
+    res = await db().from('dl_orders').insert(row).select('*').single();
+  }
+  return toOrder(must(res, 'creating order'));
 }
 
 export async function getOrder(orderId: string): Promise<Order | null> {
@@ -948,6 +1021,153 @@ export async function updateOrder(
     'updating order'
   );
   return updated ? toOrder(updated) : null;
+}
+
+// ---------------------------------------------------------------------------
+// Gmail inboxes (dl_mailboxes), managed in Admin > Settings > Gmail Inboxes
+// ---------------------------------------------------------------------------
+
+export interface Mailbox {
+  id: string;
+  gmailUser: string;
+  label: string;
+  lastTestAt: string | null;
+  lastTestOk: boolean | null;
+  lastTestMessage: string | null;
+  createdAt: string;
+  /** Set when the saved password cannot be decrypted (the encryption key changed). */
+  secretError?: string;
+}
+
+function toMailbox(r: any): Mailbox {
+  let secretError: string | undefined;
+  try {
+    openSecret(r.app_password);
+  } catch (err: any) {
+    secretError = err?.message;
+  }
+  return {
+    id: r.id,
+    gmailUser: r.gmail_user,
+    label: r.label || '',
+    lastTestAt: r.last_test_at,
+    lastTestOk: r.last_test_ok,
+    lastTestMessage: r.last_test_message,
+    createdAt: r.created_at,
+    secretError,
+  };
+}
+
+/** The address Google wants for the login: no +tag (Gmail ignores it for delivery but not for login). */
+export function loginAddress(email: string): string {
+  const e = normalizeEmail(email);
+  const at = e.indexOf('@');
+  if (at < 1) return e;
+  const domain = e.slice(at + 1);
+  if (domain !== 'gmail.com' && domain !== 'googlemail.com') return e;
+  return `${e.slice(0, at).split('+')[0]}@${domain}`;
+}
+
+/** Google app passwords are 16 letters, shown as four groups of four. */
+export function cleanAppPassword(raw: string): string {
+  return String(raw || '').replace(/\s+/g, '');
+}
+
+/** Turns "table dl_mailboxes not found" into what to do about it. */
+function mailboxTableError(message: string, action: string): StorageError {
+  return new StorageError(
+    /schema cache|does not exist|could not find the table/i.test(message)
+      ? 'Gmail inboxes need the latest SQL: run 04_dreamlabs_panel_settings.sql in the Supabase SQL Editor.'
+      : `Database error while ${action}: ${message}`
+  );
+}
+
+export async function listMailboxes(): Promise<Mailbox[]> {
+  const res = await db().from('dl_mailboxes').select('*').order('created_at', { ascending: true });
+  if (res.error) throw mailboxTableError(res.error.message, 'loading Gmail inboxes');
+  return (res.data as any[]).map(toMailbox);
+}
+
+/** Server-only: every saved inbox with its password decrypted. An unreadable one is left out. */
+export async function getMailboxSecrets(): Promise<Array<{ id: string; user: string; password: string }>> {
+  const res = await db().from('dl_mailboxes').select('id, gmail_user, app_password');
+  if (res.error) throw mailboxTableError(res.error.message, 'loading Gmail inboxes');
+  const out: Array<{ id: string; user: string; password: string }> = [];
+  for (const r of res.data as any[]) {
+    try {
+      out.push({ id: r.id, user: r.gmail_user, password: cleanAppPassword(openSecret(r.app_password)) });
+    } catch (err: any) {
+      console.error('[mailboxes]', r.gmail_user, err?.message);
+    }
+  }
+  return out;
+}
+
+/**
+ * Adds an inbox or updates it: an address that is already saved (same Gmail
+ * inbox, ignoring dots and +tags) gets the new password / label instead of an error.
+ */
+export async function saveMailbox(input: {
+  id?: string;
+  gmailUser: string;
+  appPassword?: string;
+  label?: string;
+}): Promise<Mailbox> {
+  if (!isValidEmail(input.gmailUser)) throw new UserError('Enter the Gmail address of the inbox.');
+  const user = loginAddress(input.gmailUser);
+  const password = input.appPassword ? cleanAppPassword(input.appPassword) : '';
+  if (password && !/^[A-Za-z0-9]{16}$/.test(password)) {
+    throw new UserError(
+      'A Google app password is 16 letters (like abcd efgh ijkl mnop). Create one at myaccount.google.com/apppasswords. Your normal Gmail password will not work.'
+    );
+  }
+
+  let id = input.id;
+  if (!id) {
+    const key = mailboxKey(user);
+    id = (await listMailboxes()).find((m) => mailboxKey(m.gmailUser) === key)?.id;
+  }
+
+  const patch: Record<string, unknown> = { gmail_user: user };
+  if (input.label !== undefined) patch.label = input.label.trim().slice(0, 60);
+  if (password) {
+    patch.app_password = sealSecret(password);
+    // The old test result no longer applies to a new password.
+    patch.last_test_at = null;
+    patch.last_test_ok = null;
+    patch.last_test_message = null;
+  }
+
+  if (id) {
+    // The saved address is known to work, so an update only changes the password and label.
+    delete patch.gmail_user;
+    const res = await db().from('dl_mailboxes').update(patch).eq('id', id).select('*').maybeSingle();
+    if (res.error?.code === '23505') throw new UserError('That Gmail inbox is already saved. Edit the existing one.');
+    const row = must(res, 'saving Gmail inbox');
+    if (!row) throw new UserError('Inbox not found');
+    return toMailbox(row);
+  }
+
+  if (!password) throw new UserError('Enter the Google app password for this inbox.');
+  const row = must(
+    await db().from('dl_mailboxes').insert({ ...patch, app_password: sealSecret(password) }).select('*').single(),
+    'saving Gmail inbox'
+  );
+  return toMailbox(row);
+}
+
+export async function deleteMailbox(id: string): Promise<void> {
+  must(await db().from('dl_mailboxes').delete().eq('id', id), 'deleting Gmail inbox');
+}
+
+export async function recordMailboxTest(id: string, ok: boolean, message: string): Promise<void> {
+  must(
+    await db()
+      .from('dl_mailboxes')
+      .update({ last_test_at: new Date().toISOString(), last_test_ok: ok, last_test_message: message.slice(0, 300) })
+      .eq('id', id),
+    'saving Gmail test result'
+  );
 }
 
 /** An error caused by bad input, shown to the user as a 400. */

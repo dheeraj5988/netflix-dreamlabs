@@ -66,9 +66,12 @@ export function amountsMatch(expectedRupees: number, got: unknown): boolean {
   return Number.isFinite(n) && Math.abs(n - expectedRupees) < 0.005;
 }
 
-/** Public origin of this site (for the return URLs): SITE_URL if set, else from the request. */
-export function siteOrigin(request: NextRequest): string {
-  const fixed = (process.env.SITE_URL || '').trim().replace(/\/+$/, '');
+/**
+ * Public origin of this site (for the return URLs): the Site URL saved in Settings, else the
+ * SITE_URL environment variable, else the host the request came in on.
+ */
+export function siteOrigin(request: NextRequest, configured?: string): string {
+  const fixed = (configured || process.env.SITE_URL || '').trim().replace(/\/+$/, '');
   if (fixed) return fixed;
   const url = new URL(request.url);
   const proto = request.headers.get('x-forwarded-proto')?.split(',')[0].trim() || url.protocol.replace(':', '');

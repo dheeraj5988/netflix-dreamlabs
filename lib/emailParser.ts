@@ -56,7 +56,7 @@ export function parseNetflixVerificationLink(email: EmailData): VerificationLink
     /https:\/\/www\.netflix\.com\/account\/household\/[^\s"'<>]+/gi,
     /https:\/\/www\.netflix\.com\/verify[^\s"'<>]+/gi,
     /https:\/\/www\.netflix\.com\/account\/[^\s"'<>]*verify[^\s"'<>]*/gi,
-    /https:\/\/www\.netflix\.com[^\s"'<>]*confirm[^\s"'<>]*/gi,
+    // No catch-all for links that merely contain "confirm": that also matches billing and sign-up emails.
   ];
 
   for (const pattern of linkPatterns) {

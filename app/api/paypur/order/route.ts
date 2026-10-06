@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getOrder, getPaypurCredentials, updateOrder } from '@/lib/store';
 import { describeError } from '@/lib/api-response';
 import { orderWhatsappLink, whatsappLink } from '@/lib/support';
+import { getBrand } from '@/lib/branding';
 import { amountsMatch, fetchStatus } from '@/lib/paypur';
 
 export const dynamic = 'force-dynamic';
@@ -40,9 +41,10 @@ export async function GET(request: NextRequest) {
       }
     }
 
+    const brand = await getBrand();
     const whatsappUrl =
       order.status === 'paid'
-        ? orderWhatsappLink({
+        ? orderWhatsappLink(brand, {
             orderId: order.orderId,
             txnId: order.txnId,
             planLabel: order.planLabel,
@@ -51,6 +53,7 @@ export async function GET(request: NextRequest) {
             name: order.customerName,
           })
         : whatsappLink(
+            brand,
             order.mobile,
             `Payment ${order.status === 'failed' ? 'failed' : 'not confirmed'} for order ${order.orderId} (${order.planLabel}, Rs ${order.amount})`
           );

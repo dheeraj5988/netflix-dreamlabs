@@ -3,6 +3,7 @@ import Imap from 'imap';
 import { simpleParser } from 'mailparser';
 import { aliasKey, mailboxKey } from './emails';
 import { parseNetflixVerificationLink } from './emailParser';
+import { getMailboxSecrets } from './store';
 
 /**
  * Reads the Netflix "update household" email for ONE Netflix ID.
@@ -13,10 +14,13 @@ import { parseNetflixVerificationLink } from './emailParser';
  * account. Every message is therefore matched on its recipient address and
  * only mail addressed to the customer's own Netflix ID is ever used.
  *
- * Inbox logins come from environment variables, one pair per inbox:
+ * Inbox logins (Gmail address + Google app password) are saved in the admin
+ * panel (Settings > Gmail Inboxes). The old environment variables
  *   GMAIL_USER_1 / GMAIL_APP_PASSWORD_1, GMAIL_USER_2 / GMAIL_APP_PASSWORD_2, ...
- * (GMAIL_USER / GMAIL_APP_PASSWORD without a number also works). A Netflix ID
- * is matched to the inbox with the same Gmail address, ignoring +tags and dots.
+ * (or GMAIL_USER / GMAIL_APP_PASSWORD) still work as a fallback, so nothing
+ * breaks while moving; an inbox saved in the panel wins over the same inbox in
+ * the environment. A Netflix ID is matched to the inbox with the same Gmail
+ * address, ignoring +tags and dots.
  */
 
 export interface EmailData {
@@ -30,6 +34,9 @@ export interface EmailData {
 export interface MailboxCredentials {
   user: string;
   password: string;
+  /** Where the login comes from: saved in the admin panel, or a Vercel environment variable. */
+  source?: 'panel' | 'env';
+  id?: string;
 }
 
 export type MailboxErrorCode = 'not_configured' | 'auth' | 'timeout' | 'connection' | 'imap';
@@ -56,25 +63,34 @@ const OVERALL_TIMEOUT_MS = 45_000;
 // Credentials
 // ---------------------------------------------------------------------------
 
-function configuredMailboxes(): MailboxCredentials[] {
+export function envMailboxes(): MailboxCredentials[] {
   const out: MailboxCredentials[] = [];
   const suffixes = ['', ...Array.from({ length: MAX_INBOX_SLOTS }, (_, i) => `_${i + 1}`)];
   for (const s of suffixes) {
     const user = (process.env[`GMAIL_USER${s}`] || '').trim();
     const password = (process.env[`GMAIL_APP_PASSWORD${s}`] || '').replace(/\s/g, '');
-    if (user && password) out.push({ user, password });
+    if (user && password) out.push({ user, password, source: 'env' });
   }
   return out;
 }
 
-/** The configured inbox login that receives mail for this Netflix ID, if any. */
-export function findMailbox(netflixEmail: string): MailboxCredentials | null {
-  const key = mailboxKey(netflixEmail);
-  return configuredMailboxes().find((m) => mailboxKey(m.user) === key) ?? null;
+/** Every inbox we can log in to: the ones saved in the panel, then environment ones not already saved. */
+export async function loadMailboxes(): Promise<MailboxCredentials[]> {
+  let saved: MailboxCredentials[] = [];
+  try {
+    saved = (await getMailboxSecrets()).map((m) => ({ ...m, source: 'panel' as const }));
+  } catch (err: any) {
+    // For example the settings SQL has not been run yet: the environment fallback still works.
+    console.error('[mailboxes] could not load saved inboxes:', err?.message);
+  }
+  const have = new Set(saved.map((m) => mailboxKey(m.user)));
+  return [...saved, ...envMailboxes().filter((m) => !have.has(mailboxKey(m.user)))];
 }
 
-export function hasMailbox(netflixEmail: string): boolean {
-  return findMailbox(netflixEmail) !== null;
+/** The inbox login that receives mail for this Netflix ID, if any. */
+export async function findMailbox(netflixEmail: string): Promise<MailboxCredentials | null> {
+  const key = mailboxKey(netflixEmail);
+  return (await loadMailboxes()).find((m) => mailboxKey(m.user) === key) ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -248,7 +264,7 @@ function withTimeout<T>(work: (setImap: (i: Imap) => void) => Promise<T>): Promi
  * to this Netflix ID within the last `minutes`.
  */
 export async function findHouseholdLink(netflixEmail: string, minutes: number): Promise<HouseholdLookup> {
-  const creds = findMailbox(netflixEmail);
+  const creds = await findMailbox(netflixEmail);
   if (!creds) throw new MailboxError('not_configured', 'No Gmail login is configured for this Netflix ID.');
 
   const target = aliasKey(netflixEmail);
@@ -293,15 +309,8 @@ export async function findHouseholdLink(netflixEmail: string, minutes: number): 
   });
 }
 
-/** Admin check: can we log in to the inbox that serves this Netflix ID? */
-export async function testMailbox(netflixEmail: string): Promise<{ ok: boolean; message: string; inbox?: string }> {
-  const creds = findMailbox(netflixEmail);
-  if (!creds) {
-    return {
-      ok: false,
-      message: `No Gmail login is configured for ${mailboxKey(netflixEmail)}. Add GMAIL_USER_n and GMAIL_APP_PASSWORD_n in Vercel.`,
-    };
-  }
+/** Can we log in to this inbox? */
+export async function testMailboxCredentials(creds: MailboxCredentials): Promise<{ ok: boolean; message: string; inbox: string }> {
   try {
     await withTimeout(async (setImap) => {
       const imap = await connect(creds);
@@ -310,7 +319,18 @@ export async function testMailbox(netflixEmail: string): Promise<{ ok: boolean; 
     });
     return { ok: true, message: 'Connected to the Gmail inbox.', inbox: creds.user };
   } catch (err) {
-    const e = classify(err);
-    return { ok: false, message: e.message, inbox: creds.user };
+    return { ok: false, message: classify(err).message, inbox: creds.user };
   }
+}
+
+/** Admin check: can we log in to the inbox that serves this Netflix ID? */
+export async function testMailbox(netflixEmail: string): Promise<{ ok: boolean; message: string; inbox?: string }> {
+  const creds = await findMailbox(netflixEmail);
+  if (!creds) {
+    return {
+      ok: false,
+      message: `No Gmail login is saved for ${mailboxKey(netflixEmail)}. Add it in Settings > Gmail Inboxes.`,
+    };
+  }
+  return testMailboxCredentials(creds);
 }

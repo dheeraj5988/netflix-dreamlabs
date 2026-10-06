@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
+import { encryptionEnabled } from '@/lib/secrets';
 
 export const dynamic = 'force-dynamic';
 
@@ -43,7 +44,9 @@ export async function GET() {
     ADMIN_PASSWORD: Boolean(process.env.ADMIN_PASSWORD),
     ADMIN_SESSION_SECRET: Boolean(process.env.ADMIN_SESSION_SECRET),
     CRON_SECRET: Boolean(process.env.CRON_SECRET),
-    GMAIL_INBOXES: Array.from({ length: 31 }, (_, i) => (i === 0 ? '' : `_${i}`)).filter(
+    SETTINGS_ENCRYPTION_KEY: encryptionEnabled(),
+    // Inboxes still read from the old GMAIL_USER_n variables (they are managed in the admin panel now).
+    GMAIL_ENV_INBOXES: Array.from({ length: 31 }, (_, i) => (i === 0 ? '' : `_${i}`)).filter(
       (s) => process.env[`GMAIL_USER${s}`] && process.env[`GMAIL_APP_PASSWORD${s}`]
     ).length,
   };
@@ -109,6 +112,19 @@ export async function GET() {
     gatewayConfigured: !keysProbe.error && Boolean((keysProbe.data as any)?.paypur_key && (keysProbe.data as any)?.paypur_salt),
   };
 
+  // Settings managed in the admin panel (needs the panel-settings SQL).
+  const mailboxProbe = await admin.from('dl_mailboxes').select('id', { count: 'exact' }).limit(1);
+  const settingsProbe = await admin
+    .from('dl_settings')
+    .select('site_url, household_lookback_minutes, plans')
+    .eq('id', 'default')
+    .maybeSingle();
+  const panel = {
+    mailboxesTable: !mailboxProbe.error,
+    savedInboxes: mailboxProbe.error ? 0 : mailboxProbe.count ?? 0,
+    settingsColumns: !settingsProbe.error,
+  };
+
   const { data: rpcProbe, error: rpcErr } = await admin.rpc('dl_record_tv_login', {
     p_mobile: '0000000000',
     p_code: 'HEALTH',
@@ -127,6 +143,7 @@ export async function GET() {
       env,
       tables,
       payments,
+      panel,
       tvLoginFunction: tvLoginFunction ? 'ok' : rpcErr?.message || 'missing',
       timestamp: new Date().toISOString(),
     },

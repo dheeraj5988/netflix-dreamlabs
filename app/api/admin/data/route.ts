@@ -7,6 +7,7 @@ import {
   listTvLoginsThisMonth,
   getSettings,
   getPaypurSummary,
+  listMailboxes,
   listOrders,
   importCustomers,
   indiaToday,
@@ -14,7 +15,8 @@ import {
 } from '@/lib/store';
 import { adminRoute } from '@/lib/api-response';
 import { aliasKey, mailboxKey } from '@/lib/emails';
-import { hasMailbox } from '@/lib/gmailService';
+import { envMailboxes, loadMailboxes } from '@/lib/gmailService';
+import { encryptionEnabled } from '@/lib/secrets';
 
 export const GET = adminRoute(async () => {
   const storage = await getStorageStatus();
@@ -39,6 +41,23 @@ export const GET = adminRoute(async () => {
     ordersError = err?.message || 'Could not load orders';
   }
   const paypur = await getPaypurSummary();
+
+  // Gmail inboxes: saved in the panel, plus any still only in the Vercel environment.
+  let savedMailboxes: Awaited<ReturnType<typeof listMailboxes>> = [];
+  let mailboxesError: string | null = null;
+  try {
+    savedMailboxes = await listMailboxes();
+  } catch (err: any) {
+    mailboxesError = err?.message || 'Could not load Gmail inboxes';
+  }
+  const savedKeys = new Set(savedMailboxes.map((m) => mailboxKey(m.gmailUser)));
+  const mailboxes = [
+    ...savedMailboxes.map((m) => ({ ...m, source: 'panel' as const })),
+    ...envMailboxes()
+      .filter((m) => !savedKeys.has(mailboxKey(m.user)))
+      .map((m) => ({ id: null, gmailUser: m.user, label: '', lastTestAt: null, lastTestOk: null, lastTestMessage: null, source: 'env' as const })),
+  ];
+  const usableInboxes = new Set((await loadMailboxes()).map((m) => mailboxKey(m.user)));
 
   const historyBySubscriber = new Map<string, typeof activations>();
   for (const a of activations) {
@@ -99,7 +118,7 @@ export const GET = adminRoute(async () => {
     .map(([key, row]) => ({
       ...row,
       inbox: mailboxKey(row.email),
-      gmailConfigured: hasMailbox(row.email),
+      gmailConfigured: usableInboxes.has(mailboxKey(row.email)),
       vaultAccountId: accountByKey.get(key)?.id || null,
       vaultStatus: accountByKey.get(key)?.status || null,
     }))
@@ -132,6 +151,16 @@ export const GET = adminRoute(async () => {
       orders,
       ordersError,
       paypur,
+      mailboxes,
+      mailboxesError,
+      // What is still read from Vercel environment variables (read-only: nothing here can be changed from the panel).
+      env: {
+        adminPassword: Boolean(process.env.ADMIN_PASSWORD),
+        cronSecret: Boolean(process.env.CRON_SECRET),
+        encryptionKey: encryptionEnabled(),
+        legacyGmailInboxes: envMailboxes().length,
+        siteUrl: Boolean(process.env.SITE_URL),
+      },
     },
   });
 });

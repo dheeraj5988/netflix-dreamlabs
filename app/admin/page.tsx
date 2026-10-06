@@ -31,10 +31,11 @@ import {
   XCircle,
   Mail,
   ShoppingCart,
+  KeyRound,
 } from "lucide-react"
 import { addMonthsIso, formatDisplayDate, parseSheet, todayIso, type ParsedRow, type SheetParseResult } from "@/lib/validity"
-import { COMPANY_NAME, SUPPORT_WHATSAPP } from "@/lib/support"
-import { getPlan } from "@/lib/plans"
+import { DEFAULT_BRAND, formatWhatsapp } from "@/lib/support"
+import { MAX_PLANS, displayPrice, type Plan } from "@/lib/plans"
 
 type AccountStatus = "live" | "expiring_soon" | "expired" | "needs_reimport" | "unverified" | "unknown"
 
@@ -89,6 +90,35 @@ interface AppSettings {
   supportWhatsapp: string
   maxUpdatesPerMonth: number
   logRetentionDays: number
+  siteUrl: string
+  householdLookbackMinutes: number
+  plans: Plan[]
+}
+
+interface AdminMailbox {
+  id: string | null
+  gmailUser: string
+  label: string
+  source: "panel" | "env"
+  lastTestAt: string | null
+  lastTestOk: boolean | null
+  lastTestMessage: string | null
+  secretError?: string
+}
+
+interface EnvStatus {
+  adminPassword: boolean
+  cronSecret: boolean
+  encryptionKey: boolean
+  legacyGmailInboxes: number
+  siteUrl: boolean
+}
+
+interface PlanRow {
+  months: string
+  label: string
+  price: string
+  enabled: boolean
 }
 
 interface Metrics {
@@ -111,6 +141,7 @@ interface Order {
   customerEmail: string
   planId: string
   planLabel: string
+  planMonths: number | null
   amount: number
   status: "created" | "pending" | "paid" | "failed"
   txnId: string | null
@@ -222,8 +253,29 @@ export default function AdminPage() {
   const [mailboxTests, setMailboxTests] = useState<Record<string, { busy?: boolean; ok?: boolean; message?: string }>>({})
 
   // Settings state
-  const [maxUpdates, setMaxUpdates] = useState("2")
-  const [settingsSuccess, setSettingsSuccess] = useState("")
+  const [settingsSection, setSettingsSection] = useState<"general" | "gmail" | "payments" | "backup">("general")
+  const [generalForm, setGeneralForm] = useState({
+    companyName: "",
+    supportWhatsapp: "",
+    maxUpdatesPerMonth: "2",
+    householdLookbackMinutes: "30",
+    logRetentionDays: "180",
+    siteUrl: "",
+  })
+  const [generalMsg, setGeneralMsg] = useState<{ ok: boolean; text: string } | null>(null)
+  const [planRows, setPlanRows] = useState<PlanRow[]>([])
+  const [plansMsg, setPlansMsg] = useState<{ ok: boolean; text: string } | null>(null)
+
+  // Gmail inboxes (managed here, no longer in Vercel)
+  const [mailboxes, setMailboxes] = useState<AdminMailbox[]>([])
+  const [mailboxesError, setMailboxesError] = useState<string | null>(null)
+  const [envStatus, setEnvStatus] = useState<EnvStatus | null>(null)
+  const [mbxEditingId, setMbxEditingId] = useState<string | null>(null)
+  const [mbxUser, setMbxUser] = useState("")
+  const [mbxPass, setMbxPass] = useState("")
+  const [mbxLabel, setMbxLabel] = useState("")
+  const [mbxBusy, setMbxBusy] = useState<string | null>(null)
+  const [mbxMsg, setMbxMsg] = useState<{ ok: boolean; text: string } | null>(null)
 
   // On mount check token
   useEffect(() => {
@@ -297,8 +349,22 @@ export default function AdminPage() {
         }
 
         if (data.data.settings) {
-          setMaxUpdates(String(data.data.settings.maxUpdatesPerMonth || 2))
+          const st: AppSettings = data.data.settings
+          setGeneralForm({
+            companyName: st.companyName,
+            supportWhatsapp: st.supportWhatsapp,
+            maxUpdatesPerMonth: String(st.maxUpdatesPerMonth || 2),
+            householdLookbackMinutes: String(st.householdLookbackMinutes || 30),
+            logRetentionDays: String(st.logRetentionDays || 180),
+            siteUrl: st.siteUrl || "",
+          })
+          setPlanRows(
+            (st.plans || []).map((pl) => ({ months: String(pl.months), label: pl.label, price: String(pl.price), enabled: pl.enabled }))
+          )
         }
+        setMailboxes(data.data.mailboxes || [])
+        setMailboxesError(data.data.mailboxesError || null)
+        setEnvStatus(data.data.env || null)
       } else if (res.status === 401) {
         handleLogout()
       } else {
@@ -646,26 +712,145 @@ export default function AdminPage() {
     }
   }
 
-  // Settings Save
-  const handleSaveSettings = async (e: React.FormEvent) => {
+  // Settings: general
+  const handleSaveGeneral = async (e: React.FormEvent) => {
     e.preventDefault()
-    setSettingsSuccess("")
+    setGeneralMsg(null)
     try {
       const res = await fetch("/api/admin/settings", {
         method: "POST",
         headers: getAuthHeaders(),
-        body: JSON.stringify({ maxUpdatesPerMonth: parseInt(maxUpdates, 10) }),
+        body: JSON.stringify({ general: generalForm }),
       })
       const data = await res.json()
       if (res.ok && data.ok) {
-        setSettingsSuccess("Settings saved successfully!")
+        setGeneralMsg({ ok: true, text: "Saved. The public site picks it up within a few seconds." })
         refresh()
       } else {
-        alert(data.message || "Failed to save settings")
+        setGeneralMsg({ ok: false, text: data.message || "Failed to save" })
       }
     } catch {
-      alert("Failed to save settings")
+      setGeneralMsg({ ok: false, text: "Network error" })
     }
+  }
+
+  // Settings: plans
+  const handleSavePlans = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setPlansMsg(null)
+    try {
+      const res = await fetch("/api/admin/settings", {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: JSON.stringify({
+          plans: planRows.map((r) => ({ months: Number(r.months), label: r.label, price: Number(r.price), enabled: r.enabled })),
+        }),
+      })
+      const data = await res.json()
+      if (res.ok && data.ok) {
+        setPlansMsg({ ok: true, text: "Plans saved. Customers see them within a few seconds." })
+        refresh()
+      } else {
+        setPlansMsg({ ok: false, text: data.message || "Failed to save plans" })
+      }
+    } catch {
+      setPlansMsg({ ok: false, text: "Network error" })
+    }
+  }
+
+  // Settings: Gmail inboxes
+  const resetMailboxForm = () => {
+    setMbxEditingId(null)
+    setMbxUser("")
+    setMbxPass("")
+    setMbxLabel("")
+  }
+
+  const handleSaveMailbox = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setMbxMsg(null)
+    setMbxBusy("save")
+    try {
+      const res = await fetch("/api/admin/mailboxes", {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ id: mbxEditingId || undefined, gmailUser: mbxUser, appPassword: mbxPass, label: mbxLabel }),
+      })
+      const data = await res.json()
+      if (res.ok && data.ok) {
+        setMbxMsg({ ok: data.test ? data.test.ok : true, text: data.message })
+        resetMailboxForm()
+        refresh()
+      } else {
+        setMbxMsg({ ok: false, text: data.message || "Failed to save" })
+      }
+    } catch {
+      setMbxMsg({ ok: false, text: "Network error" })
+    } finally {
+      setMbxBusy(null)
+    }
+  }
+
+  const handleTestMailbox2 = async (m: AdminMailbox) => {
+    setMbxBusy(m.id || m.gmailUser)
+    setMbxMsg(null)
+    try {
+      const res = await fetch("/api/admin/mailboxes", {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: JSON.stringify(m.id ? { action: "test", id: m.id } : { action: "test_env", gmailUser: m.gmailUser }),
+      })
+      const data = await res.json()
+      const t = data?.test
+      setMbxMsg({ ok: Boolean(t?.ok), text: t ? `${m.gmailUser}: ${t.message}` : data.message || "Test failed" })
+      refresh()
+    } catch {
+      setMbxMsg({ ok: false, text: "Network error" })
+    } finally {
+      setMbxBusy(null)
+    }
+  }
+
+  const handleDeleteMailbox = async (m: AdminMailbox) => {
+    if (!m.id) return
+    if (!confirm(`Remove ${m.gmailUser}? Customers on Netflix IDs using this inbox will no longer get their household link.`)) return
+    setMbxBusy(m.id)
+    try {
+      await fetch(`/api/admin/mailboxes?id=${m.id}`, { method: "DELETE", headers: getAuthHeaders() })
+      refresh()
+    } catch {
+      setMbxMsg({ ok: false, text: "Network error" })
+    } finally {
+      setMbxBusy(null)
+    }
+  }
+
+  const handleImportEnvMailboxes = async () => {
+    setMbxBusy("import")
+    setMbxMsg(null)
+    try {
+      const res = await fetch("/api/admin/mailboxes", {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ action: "import_env" }),
+      })
+      const data = await res.json()
+      setMbxMsg({ ok: res.ok && data.ok, text: data.message || "Failed" })
+      refresh()
+    } catch {
+      setMbxMsg({ ok: false, text: "Network error" })
+    } finally {
+      setMbxBusy(null)
+    }
+  }
+
+  // Netflix IDs tab: add the missing inbox
+  const startAddInbox = (inbox: string) => {
+    resetMailboxForm()
+    setMbxUser(inbox)
+    setMbxMsg(null)
+    setSettingsSection("gmail")
+    setActiveTab("settings")
   }
 
   // PayPur Gateway Key / Salt
@@ -739,7 +924,7 @@ export default function AdminPage() {
 
   // A paid order: open the customer form ready to activate (new customer, or extend an existing one).
   const activateFromOrder = (o: Order) => {
-    const months = getPlan(o.planId)?.months ?? 1
+    const months = o.planMonths ?? settings?.plans.find((pl) => pl.id === o.planId)?.months ?? 1
     const existing = customers.find((c) => c.mobile === o.mobile)
     const base = existing?.expiryDate && existing.expiryDate > todayIso() ? existing.expiryDate : todayIso()
     setEditingCustomer(existing || null)
@@ -860,7 +1045,7 @@ export default function AdminPage() {
             D
           </div>
           <div>
-            <h1 className="font-bold text-white text-base leading-tight">{COMPANY_NAME}</h1>
+            <h1 className="font-bold text-white text-base leading-tight">{settings?.companyName || DEFAULT_BRAND.companyName}</h1>
             <p className="text-netflix-muted text-[11px]">Netflix Customer, Household & TV Code Admin Portal</p>
           </div>
         </div>
@@ -1283,7 +1468,7 @@ export default function AdminPage() {
                     <span className="text-netflix-muted">
                       Revenue:{" "}
                       <span className="text-white font-semibold">
-                        ₹{orders.filter((o) => o.status === "paid").reduce((n, o) => n + o.amount, 0)}
+                        ₹{displayPrice(orders.filter((o) => o.status === "paid").reduce((n, o) => n + o.amount, 0))}
                       </span>
                     </span>
                   </div>
@@ -1341,7 +1526,7 @@ export default function AdminPage() {
                               </td>
                               <td className="py-3 px-4 whitespace-nowrap">
                                 <p className="text-white font-medium">{o.planLabel}</p>
-                                <p className="text-netflix-muted text-[11px]">₹{o.amount}</p>
+                                <p className="text-netflix-muted text-[11px]">₹{displayPrice(o.amount)}</p>
                               </td>
                               <td className="py-3 px-4 font-mono text-[11px]">
                                 <p className="text-netflix-light break-all">{o.orderId}</p>
@@ -1423,9 +1608,7 @@ export default function AdminPage() {
                   <h2 className="text-base font-bold text-white">Netflix IDs</h2>
                   <p className="text-netflix-muted text-xs max-w-3xl">
                     Every customer is tied to the Netflix ID on their row. The household link is read from that ID&apos;s Gmail inbox
-                    (set per inbox with <span className="font-mono">GMAIL_USER_n</span> /{" "}
-                    <span className="font-mono">GMAIL_APP_PASSWORD_n</span> in Vercel), and TV login uses the vault cookies saved with
-                    the same email.
+                    (add inboxes in Settings &gt; Gmail Inboxes), and TV login uses the vault cookies saved with the same email.
                   </p>
                 </div>
 
@@ -1466,7 +1649,7 @@ export default function AdminPage() {
                                   ) : (
                                     <span
                                       className="bg-red-500/20 text-red-400 px-2 py-0.5 rounded text-[11px] font-semibold"
-                                      title={`Add GMAIL_USER_n = ${n.inbox} and its app password in Vercel`}
+                                      title={`Add ${n.inbox} and its Google app password in Settings > Gmail Inboxes`}
                                     >
                                       Missing: {n.inbox}
                                     </span>
@@ -1493,6 +1676,16 @@ export default function AdminPage() {
                                       {test?.busy ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <Mail className="w-3 h-3 mr-1" />}
                                       Test Gmail
                                     </Button>
+                                    {!n.gmailConfigured && (
+                                      <Button
+                                        onClick={() => startAddInbox(n.inbox)}
+                                        size="sm"
+                                        variant="outline"
+                                        className="h-7 text-[11px] px-2 border-netflix-border text-netflix-light hover:text-white bg-transparent cursor-pointer"
+                                      >
+                                        <Plus className="w-3 h-3 mr-1" /> Gmail
+                                      </Button>
+                                    )}
                                     {!n.vaultAccountId && (
                                       <Button
                                         onClick={() => {
@@ -1820,56 +2013,476 @@ export default function AdminPage() {
 
             {/* 6. SETTINGS TAB */}
             {!storageError && activeTab === "settings" && (
-              <div className="space-y-6 max-w-2xl animate-fade-in">
-                <Card className="bg-netflix-card border-netflix-border p-6 rounded-xl space-y-5">
-                  <h2 className="text-base font-bold text-white">General & Security Settings</h2>
+              <div className="space-y-6 max-w-3xl animate-fade-in">
+                <div className="flex items-center gap-1 bg-netflix-card p-1 rounded-xl border border-netflix-border w-fit flex-wrap">
+                  {(
+                    [
+                      ["general", "General"],
+                      ["gmail", `Gmail Inboxes (${mailboxes.length})`],
+                      ["payments", "Plans & Payments"],
+                      ["backup", "Backup"],
+                    ] as const
+                  ).map(([id, label]) => (
+                    <button
+                      key={id}
+                      onClick={() => setSettingsSection(id)}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-medium cursor-pointer transition-colors ${
+                        settingsSection === id ? "bg-netflix-red text-white" : "text-netflix-gray hover:text-white"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
 
-                  <form onSubmit={handleSaveSettings} className="space-y-4">
-                    <div className="bg-netflix-dark/60 border border-netflix-border/50 rounded-lg p-3 text-[11px] text-netflix-muted space-y-1">
-                      <p>
-                        <span className="text-netflix-light font-medium">Admin password:</span> set with the{" "}
-                        <code className="font-mono">ADMIN_PASSWORD</code> environment variable in Vercel. Changing it signs out every
-                        admin session.
-                      </p>
-                      <p>
-                        <span className="text-netflix-light font-medium">Gmail inboxes:</span> one{" "}
-                        <code className="font-mono">GMAIL_USER_n</code> + <code className="font-mono">GMAIL_APP_PASSWORD_n</code> pair
-                        per inbox in Vercel. See the Netflix IDs tab for what is missing.
-                      </p>
-                      <p>
-                        <span className="text-netflix-light font-medium">Support WhatsApp:</span> +{SUPPORT_WHATSAPP.slice(0, 2)}{" "}
-                        {SUPPORT_WHATSAPP.slice(2, 7)} {SUPPORT_WHATSAPP.slice(7)}
-                      </p>
-                    </div>
+                {settingsSection === "general" && (
+                  <>
+                    <Card className="bg-netflix-card border-netflix-border p-6 rounded-xl space-y-5">
+                      <div>
+                        <h2 className="text-base font-bold text-white">General Settings</h2>
+                        <p className="text-netflix-muted text-xs">Saved in the database. No redeploy needed: the public site picks changes up within a few seconds.</p>
+                      </div>
 
-                    <div className="space-y-1.5 max-w-xs">
-                      <label className="text-xs font-medium text-netflix-light block">TV logins per customer per calendar month</label>
-                      <Input
-                        type="number"
-                        value={maxUpdates}
-                        onChange={(e) => setMaxUpdates(e.target.value)}
-                        className="bg-netflix-input border-netflix-border text-white text-xs h-10"
-                        min={1}
-                      />
-                      <p className="text-[11px] text-netflix-muted">Default: 2. Household updates are unlimited.</p>
-                    </div>
+                      <form onSubmit={handleSaveGeneral} className="space-y-4">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                          <div className="space-y-1.5">
+                            <label className="text-xs font-medium text-netflix-light block">Company name</label>
+                            <Input
+                              value={generalForm.companyName}
+                              onChange={(e) => setGeneralForm({ ...generalForm, companyName: e.target.value })}
+                              className="bg-netflix-input border-netflix-border text-white text-xs h-10"
+                              maxLength={60}
+                              required
+                            />
+                            <p className="text-[11px] text-netflix-muted">Shown on the site and in WhatsApp messages.</p>
+                          </div>
+                          <div className="space-y-1.5">
+                            <label className="text-xs font-medium text-netflix-light block">Support WhatsApp number</label>
+                            <Input
+                              value={generalForm.supportWhatsapp}
+                              onChange={(e) => setGeneralForm({ ...generalForm, supportWhatsapp: e.target.value })}
+                              className="bg-netflix-input border-netflix-border text-white text-xs h-10 font-mono"
+                              placeholder="91 99914 83279"
+                              required
+                            />
+                            <p className="text-[11px] text-netflix-muted">
+                              With country code. Customers reach it from every error screen
+                              {settings?.supportWhatsapp ? <> (now {formatWhatsapp(settings.supportWhatsapp)})</> : null}.
+                            </p>
+                          </div>
+                          <div className="space-y-1.5">
+                            <label className="text-xs font-medium text-netflix-light block">TV logins per customer per calendar month</label>
+                            <Input
+                              type="number"
+                              value={generalForm.maxUpdatesPerMonth}
+                              onChange={(e) => setGeneralForm({ ...generalForm, maxUpdatesPerMonth: e.target.value })}
+                              className="bg-netflix-input border-netflix-border text-white text-xs h-10"
+                              min={1}
+                              max={31}
+                            />
+                            <p className="text-[11px] text-netflix-muted">Household updates are unlimited.</p>
+                          </div>
+                          <div className="space-y-1.5">
+                            <label className="text-xs font-medium text-netflix-light block">Look for Netflix&apos;s email in the last (minutes)</label>
+                            <Input
+                              type="number"
+                              value={generalForm.householdLookbackMinutes}
+                              onChange={(e) => setGeneralForm({ ...generalForm, householdLookbackMinutes: e.target.value })}
+                              className="bg-netflix-input border-netflix-border text-white text-xs h-10"
+                              min={5}
+                              max={120}
+                            />
+                            <p className="text-[11px] text-netflix-muted">For the household link. 5 to 120, default 30.</p>
+                          </div>
+                          <div className="space-y-1.5">
+                            <label className="text-xs font-medium text-netflix-light block">Keep the activity log (days)</label>
+                            <Input
+                              type="number"
+                              value={generalForm.logRetentionDays}
+                              onChange={(e) => setGeneralForm({ ...generalForm, logRetentionDays: e.target.value })}
+                              className="bg-netflix-input border-netflix-border text-white text-xs h-10"
+                              min={31}
+                              max={3650}
+                            />
+                          </div>
+                          <div className="space-y-1.5">
+                            <label className="text-xs font-medium text-netflix-light block">Site URL (optional)</label>
+                            <Input
+                              value={generalForm.siteUrl}
+                              onChange={(e) => setGeneralForm({ ...generalForm, siteUrl: e.target.value })}
+                              className="bg-netflix-input border-netflix-border text-white text-xs h-10 font-mono"
+                              placeholder="https://your-domain.com"
+                            />
+                            <p className="text-[11px] text-netflix-muted">Used for PayPur&apos;s return URLs. Leave empty to use the address people visit.</p>
+                          </div>
+                        </div>
 
-                    {settingsSuccess && <p className="text-green-400 text-xs font-medium">{settingsSuccess}</p>}
+                        {generalMsg && <p className={`text-xs font-medium ${generalMsg.ok ? "text-green-400" : "text-red-400"}`}>{generalMsg.text}</p>}
 
-                    <Button type="submit" className="bg-netflix-red hover:bg-netflix-red-hover text-white text-xs h-10 cursor-pointer">
-                      Save Settings
-                    </Button>
-                  </form>
-                </Card>
+                        <Button type="submit" className="bg-netflix-red hover:bg-netflix-red-hover text-white text-xs h-10 cursor-pointer">
+                          Save Settings
+                        </Button>
+                      </form>
+                    </Card>
+
+                    <Card className="bg-netflix-card border-netflix-border p-6 rounded-xl space-y-4">
+                      <div>
+                        <h2 className="text-base font-bold text-white">Still set in Vercel</h2>
+                        <p className="text-netflix-muted text-xs leading-relaxed">
+                          These are the only environment variables left. They cannot be edited here: the app needs them to reach the
+                          database and to protect this login before it can read any setting.
+                        </p>
+                      </div>
+                      <div className="divide-y divide-netflix-border/50 text-xs">
+                        {[
+                          {
+                            name: "SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY",
+                            ok: true,
+                            note: "Set (this page is reading from the database).",
+                          },
+                          {
+                            name: "ADMIN_PASSWORD",
+                            ok: Boolean(envStatus?.adminPassword),
+                            note: envStatus?.adminPassword ? "Set. Changing it signs out every admin session." : "Missing: nobody can sign in to this panel.",
+                          },
+                          {
+                            name: "CRON_SECRET",
+                            ok: Boolean(envStatus?.cronSecret),
+                            note: envStatus?.cronSecret
+                              ? "Set. Used by the keepalive cron."
+                              : "Missing: the cookie keepalive cron cannot run. Add it in Vercel and as a GitHub Actions secret.",
+                          },
+                          {
+                            name: "SETTINGS_ENCRYPTION_KEY (optional)",
+                            ok: Boolean(envStatus?.encryptionKey),
+                            optional: true,
+                            note: envStatus?.encryptionKey
+                              ? "Set: Gmail app passwords and PayPur keys saved from now on are stored encrypted."
+                              : "Not set: Gmail app passwords and PayPur keys are stored as typed (protected by the database's service key). Set it in Vercel to encrypt them.",
+                          },
+                        ].map((row) => (
+                          <div key={row.name} className="py-2.5 flex items-start gap-3">
+                            <span
+                              className={`mt-0.5 w-2 h-2 rounded-full shrink-0 ${
+                                row.ok ? "bg-emerald-400" : (row as any).optional ? "bg-netflix-muted" : "bg-red-400"
+                              }`}
+                            />
+                            <div>
+                              <p className="font-mono text-netflix-light">{row.name}</p>
+                              <p className="text-netflix-muted text-[11px]">{row.note}</p>
+                            </div>
+                          </div>
+                        ))}
+                        {Boolean(envStatus?.legacyGmailInboxes) && (
+                          <div className="py-2.5 flex items-start gap-3">
+                            <span className="mt-0.5 w-2 h-2 rounded-full shrink-0 bg-amber-400" />
+                            <div>
+                              <p className="font-mono text-netflix-light">GMAIL_USER_n / GMAIL_APP_PASSWORD_n</p>
+                              <p className="text-netflix-muted text-[11px]">
+                                {envStatus?.legacyGmailInboxes} inbox(es) still come from Vercel. Copy them into the panel in the Gmail Inboxes
+                                section, then delete these variables.
+                              </p>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </Card>
+                  </>
+                )}
+
+                {settingsSection === "gmail" && (
+                  <>
+                    <Card className="bg-netflix-card border-netflix-border p-6 rounded-xl space-y-4">
+                      <div className="flex items-start justify-between gap-3 flex-wrap">
+                        <div className="max-w-xl">
+                          <h2 className="text-base font-bold text-white">Gmail Inboxes</h2>
+                          <p className="text-netflix-muted text-xs leading-relaxed">
+                            Netflix emails the household link to each customer&apos;s Netflix ID. Save the Gmail inbox that receives those
+                            emails (the plain address, without a +tag) and a Google app password. Several Netflix IDs such as{" "}
+                            <span className="font-mono">name+4@gmail.com</span> and <span className="font-mono">name+5@gmail.com</span> use the
+                            one inbox <span className="font-mono">name@gmail.com</span>. Passwords are never shown again.
+                          </p>
+                        </div>
+                      </div>
+
+                      {mailboxesError && (
+                        <div className="bg-red-950/50 border border-red-700/60 rounded-lg p-3 text-xs text-red-200">
+                          Gmail inboxes could not be loaded: <span className="font-mono">{mailboxesError}</span>. Run{" "}
+                          <span className="font-mono">04_dreamlabs_panel_settings.sql</span> in the Supabase SQL Editor.
+                        </div>
+                      )}
+
+                      {Boolean(envStatus?.legacyGmailInboxes) && (
+                        <div className="bg-amber-950/40 border border-amber-700/50 rounded-lg p-3 text-xs text-amber-200 flex items-center justify-between gap-3 flex-wrap">
+                          <p>
+                            {envStatus?.legacyGmailInboxes} inbox(es) are still set in Vercel. Copy them here, then delete{" "}
+                            <span className="font-mono">GMAIL_USER_n</span> / <span className="font-mono">GMAIL_APP_PASSWORD_n</span> there.
+                          </p>
+                          <Button
+                            onClick={handleImportEnvMailboxes}
+                            disabled={mbxBusy === "import" || Boolean(mailboxesError)}
+                            size="sm"
+                            className="h-8 text-xs bg-amber-600 hover:bg-amber-500 text-white cursor-pointer"
+                          >
+                            {mbxBusy === "import" ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : null}
+                            Copy to panel
+                          </Button>
+                        </div>
+                      )}
+
+                      <div className="border border-netflix-border rounded-lg overflow-hidden">
+                        <table className="w-full text-left text-xs">
+                          <thead className="bg-netflix-dark/80 text-netflix-muted uppercase tracking-wider text-[10px] border-b border-netflix-border">
+                            <tr>
+                              <th className="py-2.5 px-3">Gmail inbox</th>
+                              <th className="py-2.5 px-3">Status</th>
+                              <th className="py-2.5 px-3 text-right">Actions</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-netflix-border/50 text-netflix-light">
+                            {mailboxes.length === 0 ? (
+                              <tr>
+                                <td colSpan={3} className="py-6 text-center text-netflix-muted">
+                                  No inboxes yet. Add one below.
+                                </td>
+                              </tr>
+                            ) : (
+                              mailboxes.map((m) => {
+                                const busy = mbxBusy === (m.id || m.gmailUser)
+                                return (
+                                  <tr key={m.id || m.gmailUser} className="align-top">
+                                    <td className="py-3 px-3">
+                                      <p className="font-mono text-white break-all">{m.gmailUser}</p>
+                                      <p className="text-netflix-muted text-[11px]">
+                                        {m.source === "env" ? "From Vercel (copy it to the panel)" : m.label || "Saved in the panel"}
+                                      </p>
+                                    </td>
+                                    <td className="py-3 px-3 max-w-[260px]">
+                                      {m.secretError ? (
+                                        <span className="text-red-300 text-[11px]">{m.secretError}</span>
+                                      ) : m.lastTestOk === true ? (
+                                        <span className="bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded text-[11px] font-semibold">Connected</span>
+                                      ) : m.lastTestOk === false ? (
+                                        <>
+                                          <span className="bg-red-500/20 text-red-400 px-2 py-0.5 rounded text-[11px] font-semibold">Login failed</span>
+                                          <p className="text-red-300/80 text-[10px] mt-1">{m.lastTestMessage}</p>
+                                        </>
+                                      ) : (
+                                        <span className="bg-yellow-500/20 text-yellow-400 px-2 py-0.5 rounded text-[11px] font-semibold">Not tested</span>
+                                      )}
+                                      {m.lastTestAt && (
+                                        <p className="text-netflix-muted text-[10px] mt-1">{new Date(m.lastTestAt).toLocaleString("en-IN")}</p>
+                                      )}
+                                    </td>
+                                    <td className="py-3 px-3 text-right">
+                                      <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                                        <Button
+                                          onClick={() => handleTestMailbox2(m)}
+                                          disabled={busy || Boolean(m.secretError)}
+                                          size="sm"
+                                          variant="outline"
+                                          className="h-7 text-[11px] px-2 border-netflix-border text-netflix-light hover:text-white bg-transparent cursor-pointer"
+                                        >
+                                          {busy ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <Mail className="w-3 h-3 mr-1" />}
+                                          Test
+                                        </Button>
+                                        {m.id && (
+                                          <>
+                                            <button
+                                              onClick={() => {
+                                                setMbxEditingId(m.id)
+                                                setMbxUser(m.gmailUser)
+                                                setMbxLabel(m.label)
+                                                setMbxPass("")
+                                                setMbxMsg(null)
+                                              }}
+                                              className="text-netflix-muted hover:text-white p-1 cursor-pointer"
+                                              title="Replace the app password"
+                                            >
+                                              <Edit className="w-3.5 h-3.5" />
+                                            </button>
+                                            <button
+                                              onClick={() => handleDeleteMailbox(m)}
+                                              className="text-netflix-muted hover:text-red-400 p-1 cursor-pointer"
+                                              title="Remove this inbox"
+                                            >
+                                              <Trash2 className="w-3.5 h-3.5" />
+                                            </button>
+                                          </>
+                                        )}
+                                      </div>
+                                    </td>
+                                  </tr>
+                                )
+                              })
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </Card>
+
+                    <Card className="bg-netflix-card border-netflix-border p-6 rounded-xl space-y-4">
+                      <h2 className="text-base font-bold text-white flex items-center gap-2">
+                        <KeyRound className="w-4 h-4 text-netflix-red" />
+                        {mbxEditingId ? "Replace the app password" : "Add a Gmail inbox"}
+                      </h2>
+                      <form onSubmit={handleSaveMailbox} className="space-y-3.5">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                          <div className="space-y-1">
+                            <label className="text-xs font-medium text-netflix-light block">Gmail address</label>
+                            <Input
+                              type="email"
+                              value={mbxUser}
+                              onChange={(e) => setMbxUser(e.target.value.trim())}
+                              disabled={Boolean(mbxEditingId)}
+                              placeholder="yourname@gmail.com"
+                              className="bg-netflix-input border-netflix-border text-white text-xs h-10 font-mono"
+                              required
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-xs font-medium text-netflix-light block">Google app password</label>
+                            <Input
+                              type="password"
+                              autoComplete="off"
+                              value={mbxPass}
+                              onChange={(e) => setMbxPass(e.target.value)}
+                              placeholder={mbxEditingId ? "Enter the new app password" : "xxxx xxxx xxxx xxxx"}
+                              className="bg-netflix-input border-netflix-border text-white text-xs h-10 font-mono"
+                              required
+                            />
+                          </div>
+                        </div>
+                        <div className="space-y-1 sm:max-w-[50%]">
+                          <label className="text-xs font-medium text-netflix-light block">Label (optional)</label>
+                          <Input
+                            value={mbxLabel}
+                            onChange={(e) => setMbxLabel(e.target.value)}
+                            placeholder="e.g. Flex inbox"
+                            className="bg-netflix-input border-netflix-border text-white text-xs h-10"
+                            maxLength={60}
+                          />
+                        </div>
+                        <p className="text-[11px] text-netflix-muted leading-relaxed">
+                          An app password is a 16-letter code Google makes for apps: open{" "}
+                          <span className="font-mono">myaccount.google.com/apppasswords</span> (2-Step Verification must be on). Your normal Gmail
+                          password will not work. The login is tested as soon as you save.
+                        </p>
+
+                        {mbxMsg && <p className={`text-xs font-medium ${mbxMsg.ok ? "text-green-400" : "text-red-400"}`}>{mbxMsg.text}</p>}
+
+                        <div className="flex gap-2">
+                          <Button
+                            type="submit"
+                            disabled={mbxBusy === "save" || Boolean(mailboxesError)}
+                            className="bg-netflix-red hover:bg-netflix-red-hover text-white text-xs h-10 cursor-pointer"
+                          >
+                            {mbxBusy === "save" ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : null}
+                            {mbxEditingId ? "Save new password" : "Save inbox"}
+                          </Button>
+                          {(mbxEditingId || mbxUser || mbxPass) && (
+                            <Button
+                              type="button"
+                              onClick={resetMailboxForm}
+                              variant="outline"
+                              className="border-netflix-border text-netflix-gray hover:text-white text-xs h-10 bg-transparent cursor-pointer"
+                            >
+                              Cancel
+                            </Button>
+                          )}
+                        </div>
+                      </form>
+                    </Card>
+                  </>
+                )}
+
+                {settingsSection === "payments" && (
+                  <>
+                    <Card className="bg-netflix-card border-netflix-border p-6 rounded-xl space-y-4">
+                      <div>
+                        <h2 className="text-base font-bold text-white">Plans & Prices</h2>
+                        <p className="text-netflix-muted text-xs leading-relaxed">
+                          What customers can buy on the Buy Plan tab. Every plan is shown as 4K UHD, 1 Device. Prices are in rupees. Turn a plan
+                          off to hide it; old orders keep their details.
+                        </p>
+                      </div>
+                      <form onSubmit={handleSavePlans} className="space-y-3">
+                        <div className="hidden sm:grid grid-cols-[90px_1fr_110px_70px_36px] gap-2 text-[10px] uppercase tracking-wider text-netflix-muted px-1">
+                          <span>Months</span>
+                          <span>Name</span>
+                          <span>Price (₹)</span>
+                          <span>On</span>
+                          <span />
+                        </div>
+                        {planRows.map((r, i) => (
+                          <div key={i} className="grid grid-cols-2 sm:grid-cols-[90px_1fr_110px_70px_36px] gap-2 items-center">
+                            <Input
+                              type="number"
+                              value={r.months}
+                              onChange={(e) => setPlanRows(planRows.map((x, j) => (j === i ? { ...x, months: e.target.value } : x)))}
+                              className="bg-netflix-input border-netflix-border text-white text-xs h-10"
+                              min={1}
+                              max={60}
+                              aria-label="Months"
+                            />
+                            <Input
+                              value={r.label}
+                              onChange={(e) => setPlanRows(planRows.map((x, j) => (j === i ? { ...x, label: e.target.value } : x)))}
+                              className="bg-netflix-input border-netflix-border text-white text-xs h-10"
+                              maxLength={40}
+                              aria-label="Name"
+                            />
+                            <Input
+                              type="number"
+                              value={r.price}
+                              onChange={(e) => setPlanRows(planRows.map((x, j) => (j === i ? { ...x, price: e.target.value } : x)))}
+                              className="bg-netflix-input border-netflix-border text-white text-xs h-10"
+                              min={1}
+                              aria-label="Price"
+                            />
+                            <label className="flex items-center gap-1.5 text-xs text-netflix-light cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={r.enabled}
+                                onChange={(e) => setPlanRows(planRows.map((x, j) => (j === i ? { ...x, enabled: e.target.checked } : x)))}
+                                className="rounded border-netflix-border"
+                              />
+                              On
+                            </label>
+                            <button
+                              type="button"
+                              onClick={() => setPlanRows(planRows.filter((_, j) => j !== i))}
+                              className="text-netflix-muted hover:text-red-400 p-1 cursor-pointer justify-self-end"
+                              title="Remove this plan"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        ))}
+                        <div className="flex items-center gap-2 pt-1 flex-wrap">
+                          <Button
+                            type="button"
+                            onClick={() => setPlanRows([...planRows, { months: "", label: "", price: "", enabled: true }])}
+                            disabled={planRows.length >= MAX_PLANS}
+                            variant="outline"
+                            className="border-netflix-border text-white hover:bg-netflix-input text-xs h-9 bg-transparent cursor-pointer"
+                          >
+                            <Plus className="w-3.5 h-3.5 mr-1" /> Add plan
+                          </Button>
+                          <Button type="submit" className="bg-netflix-red hover:bg-netflix-red-hover text-white text-xs h-9 cursor-pointer">
+                            Save Plans
+                          </Button>
+                        </div>
+                        {plansMsg && <p className={`text-xs font-medium ${plansMsg.ok ? "text-green-400" : "text-red-400"}`}>{plansMsg.text}</p>}
+                      </form>
+                    </Card>
 
                 <Card className="bg-netflix-card border-netflix-border p-6 rounded-xl space-y-4">
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <h2 className="text-base font-bold text-white">Online Purchase (PayPur)</h2>
                       <p className="text-netflix-muted text-xs leading-relaxed">
-                        Customers can buy 3 Months (₹449), 6 Months (₹798) or 1 Year (₹1498) on the Buy Plan tab, all 4K UHD with 1
-                        Device. Paste the keys from PayPur &gt; API &amp; SDK &gt; Credentials.
-                      </p>
+                        Customers pay for the plans above on the Buy Plan tab. Paste the keys from PayPur &gt; API &amp; SDK &gt; Credentials.</p>
                     </div>
                     {paypur?.configured ? (
                       <span className="bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[11px] px-2.5 py-0.5 rounded font-semibold shrink-0">
@@ -1945,6 +2558,11 @@ export default function AdminPage() {
                   </form>
                 </Card>
 
+                  </>
+                )}
+
+                {settingsSection === "backup" && (
+                  <>
                 <Card className="bg-netflix-card border-netflix-border p-6 rounded-xl space-y-4">
                   <h2 className="text-base font-bold text-white">Database Backup & Portability</h2>
                   <p className="text-netflix-muted text-xs leading-relaxed">
@@ -1966,6 +2584,8 @@ export default function AdminPage() {
                     </label>
                   </div>
                 </Card>
+                  </>
+                )}
               </div>
             )}
           </>

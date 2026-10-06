@@ -1,12 +1,35 @@
-/** Branding and support contact, shared by the public page and the API routes. */
-export const COMPANY_NAME = 'Dream Labs Solutions';
+/**
+ * Branding and the support contact. The values are edited in Admin > Settings;
+ * DEFAULT_BRAND is what the site uses until they are saved.
+ */
+export interface Brand {
+  companyName: string;
+  /** WhatsApp number with country code and no +, e.g. 919991483279. */
+  supportWhatsapp: string;
+}
 
-/** WhatsApp number (country code + number, no +) that every error screen sends customers to. */
-export const SUPPORT_WHATSAPP = '919991483279';
+export const DEFAULT_BRAND: Brand = {
+  companyName: 'Dream Labs Solutions',
+  supportWhatsapp: '919991483279',
+};
 
-export function whatsappLink(mobile: string, issue: string): string {
-  const text = `Hi ${COMPANY_NAME}, I need help with Netflix for mobile number: ${mobile || 'N/A'}.\nIssue: ${issue}`;
-  return `https://wa.me/${SUPPORT_WHATSAPP}?text=${encodeURIComponent(text)}`;
+/** Digits only, 91 added to a 10-digit Indian number; null if it cannot be a phone number. */
+export function normalizeWhatsapp(raw: unknown): string | null {
+  const d = String(raw ?? '').replace(/\D/g, '');
+  if (/^[6-9]\d{9}$/.test(d)) return `91${d}`;
+  if (/^\d{11,15}$/.test(d)) return d;
+  return null;
+}
+
+/** "+91 99914 83279" style label for showing the number. */
+export function formatWhatsapp(number: string): string {
+  if (/^91\d{10}$/.test(number)) return `+91 ${number.slice(2, 7)} ${number.slice(7)}`;
+  return `+${number}`;
+}
+
+export function whatsappLink(brand: Brand, mobile: string, issue: string): string {
+  const text = `Hi ${brand.companyName}, I need help with Netflix for mobile number: ${mobile || 'N/A'}.\nIssue: ${issue}`;
+  return `https://wa.me/${brand.supportWhatsapp}?text=${encodeURIComponent(text)}`;
 }
 
 export interface OrderDetails {
@@ -19,16 +42,16 @@ export interface OrderDetails {
 }
 
 /** WhatsApp message a customer sends after paying, so the team can activate the plan. */
-export function orderWhatsappLink(o: OrderDetails): string {
+export function orderWhatsappLink(brand: Brand, o: OrderDetails): string {
   const lines = [
-    `Hi ${COMPANY_NAME}, I have paid for a Netflix subscription. Please activate it.`,
+    `Hi ${brand.companyName}, I have paid for a Netflix subscription. Please activate it.`,
     '',
     `Order ID: ${o.orderId}`,
     ...(o.txnId ? [`Transaction ID: ${o.txnId}`] : []),
     `Plan: ${o.planLabel} (4K UHD, 1 Device)`,
-    `Amount: Rs ${o.amount}`,
+    `Amount: Rs ${Number.isInteger(Number(o.amount)) ? Number(o.amount) : Number(o.amount).toFixed(2)}`,
     `Mobile: ${o.mobile}`,
     ...(o.name ? [`Name: ${o.name}`] : []),
   ];
-  return `https://wa.me/${SUPPORT_WHATSAPP}?text=${encodeURIComponent(lines.join('\n'))}`;
+  return `https://wa.me/${brand.supportWhatsapp}?text=${encodeURIComponent(lines.join('\n'))}`;
 }

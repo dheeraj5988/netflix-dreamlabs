@@ -34,23 +34,34 @@ This app can share a Supabase project with tetra-household. Everything it create
    It is safe to run again. The last query should list four tables with `rls_enabled = true` and `anon_access = false`.
 2. For online purchase, also run [`supabase/migrations/20261007_dreamlabs_payments.sql`](supabase/migrations/20261007_dreamlabs_payments.sql)
    (adds `dl_orders` and the PayPur key columns). It is safe to run again.
-3. Load customers either with the admin console (**Customers > Paste Sheet / Upload CSV**) or by running a seed SQL file.
+3. To manage the Gmail inboxes, company details and plans from the admin panel, also run
+   [`supabase/migrations/20261008_dreamlabs_panel_settings.sql`](supabase/migrations/20261008_dreamlabs_panel_settings.sql)
+   (adds `dl_mailboxes` and a few settings columns). It is safe to run again.
+4. Load customers either with the admin console (**Customers > Paste Sheet / Upload CSV**) or by running a seed SQL file.
 
 ### 2. Environment variables (Vercel)
 
-See [`.env.example`](.env.example).
+Only a few are needed. See [`.env.example`](.env.example).
 
 | Variable | Purpose |
 | --- | --- |
-| `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | same values as tetra-household if you share the project |
+| `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | how the app reaches the database (same values as tetra-household if you share the project) |
 | `ADMIN_PASSWORD` | admin console passcode (`ADMIN_SESSION_SECRET` is optional) |
-| `CRON_SECRET` | protects the keepalive endpoint |
-| `GMAIL_USER_1` / `GMAIL_APP_PASSWORD_1`, `_2`, `_3` ... | one pair per Gmail **inbox** (see below) |
+| `CRON_SECRET` | protects the keepalive endpoint (Vercel's cron sends it) |
+| `SETTINGS_ENCRYPTION_KEY` *(optional)* | encrypts the Gmail app passwords and PayPur keys saved from the panel |
 
-**Gmail inboxes.** Use the real inbox address (no `+tag`) and a Google *App password*. A Netflix ID is matched to the inbox with the
-same Gmail address, ignoring `+tags` and dots. For example, `yourname+4@gmail.com`, `yourname+5@gmail.com` and
-`YourName@gmail.com` all use the `GMAIL_USER_n=yourname@gmail.com` pair. The admin **Netflix IDs** tab lists every
-Netflix ID, tells you which inboxes are still missing, and has a **Test Gmail** button.
+Everything else is saved from **/admin > Settings** and applies immediately, with no redeploy: Gmail inboxes and app passwords, the
+PayPur Gateway Key and Salt, company name, support WhatsApp number, plans and prices, how far back to look for Netflix's email, the
+monthly TV login limit, log retention and the site URL. Cookies, customers and orders are saved there too.
+
+**Gmail inboxes** (Settings > Gmail Inboxes). Save the real inbox address (no `+tag`) and a Google *App password* (16 letters, from
+myaccount.google.com/apppasswords). A Netflix ID is matched to the inbox with the same Gmail address, ignoring `+tags` and dots, so
+`yourname+4@gmail.com`, `yourname+5@gmail.com` and `YourName@gmail.com` all use the inbox `yourname@gmail.com`. The login is tested when
+you save. The app password is write-only: it is never shown again, only replaced. The admin **Netflix IDs** tab lists every Netflix ID,
+shows which inboxes are still missing and has a **Test Gmail** button.
+
+*Moving from the old setup:* inboxes still set as `GMAIL_USER_n` / `GMAIL_APP_PASSWORD_n` in Vercel keep working. Settings > Gmail
+Inboxes shows them and has a **Copy to panel** button; after that you can delete those variables.
 
 ### 3. Keepalive (TV login cookies)
 
@@ -74,11 +85,11 @@ yourname+4@gmail.com               91 91234 56789     15-Jan-27
 
 ## Online purchase (PayPur)
 
-Plans (4K UHD, 1 Device): **3 Months ₹449, 6 Months ₹798, 1 Year ₹1498** (in [`lib/plans.ts`](lib/plans.ts)). The price always comes
-from the server, never from the browser.
+Plans (4K UHD, 1 Device) start as **3 Months ₹449, 6 Months ₹798, 1 Year ₹1498** and are edited in Settings > Plans & Payments. The
+price always comes from the saved plan on the server, never from the browser.
 
 1. Run the payments SQL (above).
-2. Admin > **Settings > Online Purchase (PayPur)**: paste the **Paypur Gateway Key** (PayPur's API key) and **Paypur Gateway Salt**
+2. Admin > **Settings > Plans & Payments**: paste the **Paypur Gateway Key** (PayPur's API key) and **Paypur Gateway Salt**
    (its signing secret) from PayPur > API & SDK > Credentials. They are stored in `dl_settings` (service role only); the admin console
    only ever shows the last 4 characters of the key and never the salt. The card also lists the two return URLs this site gives PayPur.
 3. The Buy Plan tab is now live. A customer whose number is not found or whose plan has expired also sees *"You can buy a subscription
@@ -92,8 +103,8 @@ order, and one transaction can pay only one order. In the admin **Orders** tab, 
 expiry filled in (you add the Netflix ID), **Check status** asks PayPur again and **Mark paid** is for a payment you confirmed in the
 PayPur dashboard.
 
-Optional env vars: `SITE_URL` (public https URL used for the return URLs; defaults to the request's host) and `PAYPUR_BASE_URL`
-(only for a sandbox, default `https://upi.paypur.in`).
+The return URLs use the *Site URL* from Settings > General, or the address the customer visited if it is empty. `PAYPUR_BASE_URL` is only
+for pointing the app at a sandbox (default `https://upi.paypur.in`).
 
 ## TV login cookies
 

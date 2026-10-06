@@ -1,8 +1,17 @@
 import crypto from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
-import { countRecentOrders, createOrder, getPaypurCredentials, normalizeMobile, updateOrder } from '@/lib/store';
-import { clientIp, describeError, whatsappLink } from '@/lib/api-response';
-import { formatAmount, getPlan, planProductInfo } from '@/lib/plans';
+import {
+  countRecentOrders,
+  createOrder,
+  getPaypurCredentials,
+  getSettingsCached,
+  normalizeMobile,
+  updateOrder,
+} from '@/lib/store';
+import { clientIp, describeError } from '@/lib/api-response';
+import { getBrand } from '@/lib/branding';
+import { whatsappLink } from '@/lib/support';
+import { findPlan, formatAmount, planProductInfo } from '@/lib/plans';
 import { isValidEmail, normalizeEmail } from '@/lib/emails';
 import { initPayment, siteOrigin } from '@/lib/paypur';
 
@@ -16,12 +25,15 @@ export const maxDuration = 30;
 export async function POST(request: NextRequest) {
   const body = await request.json().catch(() => ({}));
   const mobile = normalizeMobile(String(body?.mobile || '').replace(/\D/g, ''));
-  const plan = getPlan(body?.plan);
+  const settings = await getSettingsCached();
+  const brand = await getBrand();
+  // Only plans the admin has enabled can be bought, at the price saved in Settings.
+  const plan = findPlan(settings.plans.filter((p) => p.enabled), body?.plan);
   const name = String(body?.name || '').replace(/\s+/g, ' ').trim().slice(0, 60);
   const email = normalizeEmail(body?.email);
 
   const fail = (message: string, status: number, extra: Record<string, unknown> = {}) =>
-    NextResponse.json({ success: false, message, whatsappUrl: whatsappLink(mobile || '', message), ...extra }, { status });
+    NextResponse.json({ success: false, message, whatsappUrl: whatsappLink(brand, mobile || '', message), ...extra }, { status });
 
   if (!plan) return fail('Please choose a plan', 400);
   if (name.length < 2) return fail('Please enter your name', 400);
@@ -48,11 +60,12 @@ export async function POST(request: NextRequest) {
       customerEmail: email,
       planId: plan.id,
       planLabel: plan.label,
+      planMonths: plan.months,
       amount: plan.price,
       ip: clientIp(request),
     });
 
-    const origin = siteOrigin(request);
+    const origin = siteOrigin(request, settings.siteUrl);
     const init = await initPayment(creds, {
       orderId,
       amount,

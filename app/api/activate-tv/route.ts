@@ -8,7 +8,9 @@ import {
   finalizeTvLogin,
   updateAccountAfterTvLogin,
 } from '@/lib/store';
-import { clientIp, describeError, whatsappLink } from '@/lib/api-response';
+import { clientIp, describeError } from '@/lib/api-response';
+import { getBrand } from '@/lib/branding';
+import { whatsappLink } from '@/lib/support';
 import { confirmTvCode, TvPairResult } from '@/lib/netflix-tv';
 
 export const maxDuration = 45;
@@ -50,9 +52,10 @@ export async function POST(request: NextRequest) {
   const raw = String(body?.mobile || '').replace(/\D/g, '');
   const mobile = normalizeMobile(raw);
   const code = String(body?.code || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const brand = await getBrand();
 
   const fail = (message: string, status: number, extra: Record<string, unknown> = {}) =>
-    NextResponse.json({ success: false, message, whatsappUrl: whatsappLink(mobile || raw, message), ...extra }, { status });
+    NextResponse.json({ success: false, message, whatsappUrl: whatsappLink(brand, mobile || raw, message), ...extra }, { status });
 
   if (!mobile) return fail('Please enter a valid 10-digit mobile number', 400);
   if (code.length < 4) return fail('Please enter a valid TV code (at least 4 characters)', 400);

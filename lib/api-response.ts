@@ -4,8 +4,6 @@ import { StorageError } from './db';
 import { UserError } from './store';
 import { verifyAdminRequest } from './admin-auth';
 
-export { SUPPORT_WHATSAPP, whatsappLink } from './support';
-
 export function clientIp(request: NextRequest): string {
   return (
     request.headers.get('x-forwarded-for')?.split(',')[0].trim() || request.headers.get('x-real-ip') || 'unknown'

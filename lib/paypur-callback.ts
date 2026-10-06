@@ -1,6 +1,6 @@
 import 'server-only';
 import { NextRequest, NextResponse } from 'next/server';
-import { getOrder, getPaypurCredentials, updateOrder } from './store';
+import { getOrder, getPaypurCredentials, getSettingsCached, updateOrder } from './store';
 import { amountsMatch, classifyStatus, fetchStatus, siteOrigin, verifyCallbackSignature } from './paypur';
 
 /**
@@ -42,7 +42,7 @@ async function readParams(request: NextRequest): Promise<Record<string, string>>
 
 export async function handlePaypurCallback(request: NextRequest): Promise<NextResponse> {
   const params = await readParams(request);
-  const origin = siteOrigin(request);
+  const origin = siteOrigin(request, (await getSettingsCached()).siteUrl);
   const go = (path: string) => NextResponse.redirect(new URL(path, origin), 303);
 
   const orderId = String(params.order_id || '').trim();

@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { findHouseholdLink, MailboxError } from '@/lib/gmailService';
-import { checkCustomerEligibility, logActivation, normalizeMobile } from '@/lib/store';
-import { clientIp, describeError, whatsappLink } from '@/lib/api-response';
+import { checkCustomerEligibility, getSettingsCached, logActivation, normalizeMobile } from '@/lib/store';
+import { clientIp, describeError } from '@/lib/api-response';
+import { getBrand } from '@/lib/branding';
+import { whatsappLink } from '@/lib/support';
 
 export const maxDuration = 60; // 60 seconds for Vercel serverless functions
 
@@ -15,10 +17,12 @@ export async function POST(request: NextRequest) {
   const body = await request.json().catch(() => ({}));
   const raw = String(body?.mobile || '').replace(/\D/g, '');
   const mobile = normalizeMobile(raw);
-  const minutesAgo = Math.min(120, Math.max(5, parseInt(String(body?.minutes || '30'), 10) || 30));
+  const brand = await getBrand();
+  // How far back to look for Netflix's email is a setting (Admin > Settings), not something the browser chooses.
+  const minutesAgo = (await getSettingsCached()).householdLookbackMinutes;
 
   const fail = (message: string, status: number, extra: Record<string, unknown> = {}) =>
-    NextResponse.json({ success: false, message, whatsappUrl: whatsappLink(mobile || raw, message), ...extra }, { status });
+    NextResponse.json({ success: false, message, whatsappUrl: whatsappLink(brand, mobile || raw, message), ...extra }, { status });
 
   if (!mobile) return fail('Please enter a valid 10-digit mobile number', 400);
 
