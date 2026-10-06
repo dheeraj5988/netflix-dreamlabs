@@ -23,7 +23,8 @@ let client: SupabaseClient | null = null;
 export function db(): SupabaseClient {
   if (client) return client;
 
-  const url = (process.env.SUPABASE_URL || '').trim();
+  // Accept the URL as pasted from the dashboard: a trailing slash or /rest/v1 is not part of it.
+  const url = (process.env.SUPABASE_URL || '').trim().replace(/\/+$/, '').replace(/\/rest\/v1$/i, '');
   const key = (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
   if (!url) throw new StorageError('Database is not configured: SUPABASE_URL is missing.');
   if (!key) throw new StorageError('Database is not configured: SUPABASE_SERVICE_ROLE_KEY is missing.');

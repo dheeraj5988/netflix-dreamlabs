@@ -69,8 +69,12 @@ export async function GET() {
   await Promise.all(
     Object.entries(EXPECTED_COLUMNS).map(async ([table, columns]) => {
       const { count, error } = await admin.from(table).select('*', { count: 'exact', head: true });
-      if (error) {
-        tables[table] = { exists: false, error: error.message || error.code || 'unknown error' };
+      // count is null (with no error) when the table does not exist: HEAD requests get an empty 404.
+      if (error || count === null) {
+        tables[table] = {
+          exists: false,
+          error: error?.message || error?.code || 'Table not found in this Supabase project: run the schema SQL',
+        };
         return;
       }
 

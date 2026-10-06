@@ -725,14 +725,19 @@ export async function getStorageStatus(): Promise<StorageStatus> {
   try {
     const tables = ['dl_subscribers', 'dl_accounts', 'dl_activations', 'dl_settings'];
     const counts: Record<string, number> = {};
+    // A normal (non-HEAD) read: for a table that does not exist, a HEAD request comes back
+    // as an empty 404 that supabase-js reports as "no error, no rows", which would be
+    // mistaken for an empty table.
     await Promise.all(
       tables.map(async (t) => {
-        const res = await db().from(t).select('*', { count: 'exact', head: true });
+        const res = await db().from(t).select('id', { count: 'exact' }).limit(1);
         if (res.error) throw new StorageError(`Table "${t}": ${res.error.message || res.error.code}`);
-        counts[t] = res.count || 0;
+        counts[t] = res.count ?? 0;
       })
     );
-    if (!counts.dl_settings) throw new StorageError('Settings row is missing. Run the Supabase migration.');
+    if (!counts.dl_settings) {
+      throw new StorageError('The dl_settings row is missing. Run the schema SQL (01_dreamlabs_schema.sql) again; it adds the row.');
+    }
     return {
       ok: true,
       provider: 'supabase',
@@ -742,12 +747,21 @@ export async function getStorageStatus(): Promise<StorageStatus> {
       counts,
     };
   } catch (err: any) {
+    const raw: string = err?.message || 'Could not reach Supabase';
+    const host = (process.env.SUPABASE_URL || '').replace(/^https?:\/\//i, '').split('/')[0];
+    const hint = /could not find the table|schema cache|does not exist/i.test(raw)
+      ? ` The dl_* tables are not in the Supabase project this site is connected to${host ? ` (${host})` : ''}. Run the schema SQL (01_dreamlabs_schema.sql) in the SQL Editor of that same project.`
+      : /invalid path/i.test(raw)
+        ? ' SUPABASE_URL looks wrong: it must be just https://<project-ref>.supabase.co.'
+        : /permission denied|jwt|api key|unauthorized/i.test(raw)
+          ? ' SUPABASE_SERVICE_ROLE_KEY looks wrong: use the service_role / secret key, not the publishable (anon) key.'
+          : '';
     return {
       ok: false,
       provider: 'supabase',
       label: 'Storage error',
       isPersistent: false,
-      details: err?.message || 'Could not reach Supabase',
+      details: raw + hint,
     };
   }
 }
