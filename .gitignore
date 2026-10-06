@@ -9,8 +9,13 @@ next.user-config.*
 
 # Environment variables
 .env*.local
+.env
 
 # Common ignores
 node_modules
 .next/
 .DS_Store
+*.tsbuildinfo
+
+# Local-only data: customer sheets and generated SQL contain customer mobile numbers
+*.local.*

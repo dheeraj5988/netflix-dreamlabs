@@ -1,0 +1,16 @@
+{
+  "functions": {
+    "app/api/latest-netflix-link/route.ts": {
+      "maxDuration": 60
+    },
+    "app/api/cron/keepalive-cookies/route.ts": {
+      "maxDuration": 60
+    }
+  },
+  "crons": [
+    {
+      "path": "/api/cron/keepalive-cookies",
+      "schedule": "30 0 * * *"
+    }
+  ]
+}

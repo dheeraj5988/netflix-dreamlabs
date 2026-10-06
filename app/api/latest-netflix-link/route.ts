@@ -1,101 +1,86 @@
-import { fetchLatestNetflixEmail } from '@/lib/gmailService';
-import { parseNetflixVerificationLink } from '@/lib/emailParser';
+import { NextRequest, NextResponse } from 'next/server';
+import { findHouseholdLink, MailboxError } from '@/lib/gmailService';
+import { checkCustomerEligibility, logActivation, normalizeMobile } from '@/lib/store';
+import { clientIp, describeError, whatsappLink } from '@/lib/api-response';
 
-export async function GET(request: Request) {
-  const { searchParams } = new URL(request.url);
-  const accountStr = searchParams.get('account');
-  const minutesStr = searchParams.get('minutes') || '30';
+export const maxDuration = 60; // 60 seconds for Vercel serverless functions
 
-  // Validate account number
-  const account = parseInt(accountStr || '');
-  if (isNaN(account) || account < 1 || account > 5) {
-    return Response.json({
-      success: false,
-      message: 'Invalid account number. Must be between 1 and 5.',
-    });
+/**
+ * Household update: only for a valid, active customer (checked here on the
+ * server). The link is read from the Gmail inbox of the customer's own Netflix
+ * ID, which comes from the database, never from the request. Unlimited uses;
+ * each attempt is logged.
+ */
+export async function POST(request: NextRequest) {
+  const body = await request.json().catch(() => ({}));
+  const raw = String(body?.mobile || '').replace(/\D/g, '');
+  const mobile = normalizeMobile(raw);
+  const minutesAgo = Math.min(120, Math.max(5, parseInt(String(body?.minutes || '30'), 10) || 30));
+
+  const fail = (message: string, status: number, extra: Record<string, unknown> = {}) =>
+    NextResponse.json({ success: false, message, whatsappUrl: whatsappLink(mobile || raw, message), ...extra }, { status });
+
+  if (!mobile) return fail('Please enter a valid 10-digit mobile number', 400);
+
+  let eligibility;
+  try {
+    eligibility = await checkCustomerEligibility(mobile, 'household_update');
+  } catch (err) {
+    const { status, message } = describeError(err);
+    return fail(status === 503 ? 'Service temporarily unavailable. Please contact support on WhatsApp.' : message, status);
+  }
+  if (!eligibility.eligible || !eligibility.customer) {
+    return fail(eligibility.message, 403, { reason: eligibility.reason });
   }
 
-  const minutes = parseInt(minutesStr);
-  const searchSince = new Date(Date.now() - minutes * 60 * 1000);
-
-  // Get credentials from environment variables
-  const emailKey = `GMAIL_USER_${account}`;
-  const passwordKey = `GMAIL_APP_PASSWORD_${account}`;
-
-  const userEmail = process.env[emailKey];
-  const appPassword = process.env[passwordKey];
-
-  if (!userEmail || !appPassword) {
-    return Response.json({
-      success: false,
-      message: `Credentials for account ${account} not found.`,
-    });
-  }
+  const customer = eligibility.customer;
+  const log = async (status: 'success' | 'failed', notes: string) => {
+    try {
+      await logActivation({
+        subscriberId: customer.id,
+        mobile,
+        netflixEmail: customer.netflixEmail,
+        action: 'household_update',
+        status,
+        ip: clientIp(request),
+        notes,
+      });
+    } catch (err) {
+      // The customer still gets the link; the failed log write is visible in Vercel logs.
+      describeError(err);
+    }
+  };
 
   try {
-    // Fetch the latest Netflix email from Gmail
-    const email = await fetchLatestNetflixEmail(
-      userEmail,
-      appPassword,
-      searchSince
-    );
+    const found = await findHouseholdLink(customer.netflixEmail, minutesAgo);
 
-    if (!email) {
-      return Response.json({
-        success: false,
-        message: `No Netflix verification link found in the last ${minutes} minutes.`,
-      });
+    if (!found.ok) {
+      const message =
+        found.reason === 'no_email'
+          ? `No Netflix update email has arrived for your account in the last ${minutesAgo} minutes. Request the update from your TV or phone first, then try again.`
+          : "Netflix's email arrived but the update link could not be read from it. Please request the update again, or contact support on WhatsApp.";
+      await log('failed', found.reason === 'no_email' ? 'No recent Netflix email for this Netflix ID' : 'Email found but no update link in it');
+      return fail(message, 404, { reason: found.reason });
     }
 
-    // Strict JavaScript-level time filtering
-    // IMAP SINCE only filters by date (midnight), not minutes
-    const emailTimestamp = email.date.getTime();
-    const cutoffTimestamp = Date.now() - minutes * 60 * 1000;
-
-    if (emailTimestamp < cutoffTimestamp) {
-      return Response.json({
-        success: false,
-        message: `No recent Netflix verification link found. The latest email is older than ${minutes} minutes.`,
-      });
-    }
-
-    // Parse the email to find Netflix verification link
-    const verificationLink = parseNetflixVerificationLink(email);
-    if (verificationLink) {
-      return Response.json({
-        success: true,
-        url: verificationLink.url,
-        message: 'Update link found successfully.',
-      });
-    }
-
-    return Response.json({
-      success: false,
-      message: 'No valid Netflix verification link found in the email.',
+    await log('success', `Household update link delivered (email received ${found.emailDate.toISOString()})`);
+    return NextResponse.json({
+      success: true,
+      link: found.url,
+      emailDate: found.emailDate.toISOString(),
+      linkExpiry: '15 minutes from email receipt',
     });
-  } catch (error: any) {
-    console.error('Error fetching Netflix verification link:', error);
-
-    // Provide specific error messages
-    const errorMessage = error.message || '';
-    if (errorMessage.includes('Authentication failed')) {
-      return Response.json({
-        success: false,
-        message: 'Authentication failed. Please check your credentials.',
-      });
-    } else if (
-      errorMessage.includes('timeout') ||
-      errorMessage.includes('ETIMEDOUT')
-    ) {
-      return Response.json({
-        success: false,
-        message: 'Request timed out. Please try again shortly.',
-      });
+  } catch (err) {
+    if (err instanceof MailboxError) {
+      console.error('[household]', err.code, err.message, { netflixId: customer.netflixEmail });
+      await log('failed', `Mailbox error (${err.code}): ${err.message}`);
+      const message =
+        err.code === 'not_configured' || err.code === 'auth'
+          ? "We couldn't open the mailbox for your Netflix account. Please contact support on WhatsApp."
+          : 'Could not reach Gmail right now. Please try again in a minute.';
+      return fail(message, err.code === 'not_configured' || err.code === 'auth' ? 503 : 502, { reason: `mailbox_${err.code}` });
     }
-
-    return Response.json({
-      success: false,
-      message: 'Service is temporarily unavailable. Please try again shortly.',
-    });
+    const { status, message } = describeError(err);
+    return fail(status === 503 ? 'Service temporarily unavailable. Please contact support on WhatsApp.' : message, status);
   }
 }

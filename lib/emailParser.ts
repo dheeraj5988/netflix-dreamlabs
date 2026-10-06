@@ -1,8 +1,10 @@
-import { EmailData } from './gmailService'
+import type { EmailData } from './gmailService';
 
 export interface VerificationLink {
-  url: string
-  foundIn: string
+  url: string;
+  foundIn: string;
+  /** "primary" is the real Update Primary Location link; "fallback" is any other household/verify link. */
+  kind: 'primary' | 'fallback';
 }
 
 /**
@@ -15,56 +17,54 @@ function decodeHtmlEntities(text: string): string {
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
-    .replace(/&apos;/g, "'")
+    .replace(/&#x27;/g, "'")
+    .replace(/&apos;/g, "'");
 }
 
 /**
- * Sanitize URL by removing trailing punctuation and whitespace
+ * Strip trailing punctuation and whitespace from a URL cut out of free text.
+ * Query parameters (including the & between them) are kept intact.
  */
 function sanitizeUrl(url: string): string {
-  return url.replace(/[.,;:!?)\]}>'"&\s]+$/, '').replace(/&amp;/g, '&')
+  return url.replace(/[.,;:!?)\]}>'"\s]+$/, '');
 }
 
-export function parseNetflixVerificationLink(
-  email: EmailData
-): VerificationLink | null {
+export function parseNetflixVerificationLink(email: EmailData): VerificationLink | null {
   // Check if email is from Netflix
-  const fromLower = email.from.toLowerCase()
+  const fromLower = email.from.toLowerCase();
   const isFromNetflix =
     fromLower.includes('netflix.com') ||
     fromLower.includes('info@account.netflix') ||
-    fromLower.includes('noreply@netflix')
+    fromLower.includes('noreply@netflix');
 
-  if (!isFromNetflix) return null
+  if (!isFromNetflix) return null;
 
   // Decode HTML entities and use the content
-  let content = email.html || email.text
-  content = decodeHtmlEntities(content)
+  const content = decodeHtmlEntities(email.html || email.text);
 
-  // Look for "Update Primary Location" URL first (priority for household updates)
-  const updatePrimaryLocationRegex = /https:\/\/www\.netflix\.com\/account\/update-primary-location\?[^\s"'<>&]+/i
-  const updateMatch = content.match(updatePrimaryLocationRegex)
+  // The "Update Primary Location" URL first (priority for household updates).
+  // The whole URL is kept: Netflix puts the sign-in token and tracking in separate parameters.
+  const updatePrimaryLocationRegex = /https:\/\/www\.netflix\.com\/account\/update-primary-location\?[^\s"'<>]+/i;
+  const updateMatch = content.match(updatePrimaryLocationRegex);
   if (updateMatch) {
-    const url = sanitizeUrl(updateMatch[0])
-    return { url, foundIn: email.from }
+    return { url: sanitizeUrl(updateMatch[0]), foundIn: email.from, kind: 'primary' };
   }
 
   // Fall back to other Netflix verification/household URLs
   const linkPatterns = [
-    /https:\/\/www\.netflix\.com\/account\/travel\/[^\s"'<>&]+/gi,
-    /https:\/\/www\.netflix\.com\/account\/household\/[^\s"'<>&]+/gi,
-    /https:\/\/www\.netflix\.com\/verify[^\s"'<>&]+/gi,
-    /https:\/\/www\.netflix\.com\/account\/[^\s"'<>&]*verify[^\s"'<>&]*/gi,
-    /https:\/\/www\.netflix\.com[^\s"'<>&]*confirm[^\s"'<>&]*/gi,
-  ]
+    /https:\/\/www\.netflix\.com\/account\/travel\/[^\s"'<>]+/gi,
+    /https:\/\/www\.netflix\.com\/account\/household\/[^\s"'<>]+/gi,
+    /https:\/\/www\.netflix\.com\/verify[^\s"'<>]+/gi,
+    /https:\/\/www\.netflix\.com\/account\/[^\s"'<>]*verify[^\s"'<>]*/gi,
+    /https:\/\/www\.netflix\.com[^\s"'<>]*confirm[^\s"'<>]*/gi,
+  ];
 
   for (const pattern of linkPatterns) {
-    const matches = content.match(pattern)
+    const matches = content.match(pattern);
     if (matches && matches.length > 0) {
-      const url = sanitizeUrl(matches[0])
-      return { url, foundIn: email.from }
+      return { url: sanitizeUrl(matches[0]), foundIn: email.from, kind: 'fallback' };
     }
   }
 
-  return null
+  return null;
 }

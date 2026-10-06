@@ -4,6 +4,18 @@
 @custom-variant dark (&:is(.dark *));
 
 :root {
+  /* Netflix theme (dark) */
+  --netflix-dark: #141414;
+  --netflix-darker: #0a0a0a;
+  --netflix-card: #1f1f1f;
+  --netflix-border: #2a2a2a;
+  --netflix-input: #2a2a2a;
+  --netflix-red: #e50914;
+  --netflix-red-hover: #f40612;
+  --netflix-gray: #b3b3b3;
+  --netflix-light: #e5e5e5;
+  --netflix-muted: #808080;
+
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
   --card: oklch(1 0 0);
@@ -77,6 +89,17 @@
 @theme inline {
   --font-sans: 'Geist', 'Geist Fallback';
   --font-mono: 'Geist Mono', 'Geist Mono Fallback';
+
+  --color-netflix-dark: var(--netflix-dark);
+  --color-netflix-darker: var(--netflix-darker);
+  --color-netflix-card: var(--netflix-card);
+  --color-netflix-border: var(--netflix-border);
+  --color-netflix-input: var(--netflix-input);
+  --color-netflix-red: var(--netflix-red);
+  --color-netflix-red-hover: var(--netflix-red-hover);
+  --color-netflix-gray: var(--netflix-gray);
+  --color-netflix-light: var(--netflix-light);
+  --color-netflix-muted: var(--netflix-muted);
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -122,4 +145,20 @@
   body {
     @apply bg-background text-foreground;
   }
+}
+
+/* Custom animations */
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.4s ease-out;
 }

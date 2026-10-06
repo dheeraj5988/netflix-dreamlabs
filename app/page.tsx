@@ -1,221 +1,483 @@
 'use client';
 
+import type React from 'react';
 import { useState, useEffect } from 'react';
-import { AlertTriangle, CheckCircle2, ExternalLink, ArrowLeft, Loader } from 'lucide-react';
+import {
+  AlertTriangle,
+  ArrowLeft,
+  CheckCircle2,
+  Clock,
+  ExternalLink,
+  Loader2,
+  MessageCircle,
+  RotateCcw,
+  ShieldCheck,
+  Tv,
+} from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Card } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
 import { fetchLatestNetflixLink } from '@/lib/api';
+import { COMPANY_NAME, whatsappLink } from '@/lib/support';
 
-type Status = 'idle' | 'verifying' | 'fetching' | 'success' | 'error';
+type FlowTab = 'tv_login' | 'household';
+type PageStatus = 'idle' | 'loading' | 'tv_success' | 'household_success' | 'error';
 
-export default function Home() {
+interface CustomerQuota {
+  currentCount: number;
+  maxCount: number;
+}
+
+const MOBILE_KEY = 'dreamlabs_saved_mobile';
+
+// The mobile number is remembered in a cookie (365 days). The earlier version of this
+// page stored it in localStorage, so that value is picked up once and moved.
+function getSavedMobile(): string {
+  if (typeof document === 'undefined') return '';
+  const match = document.cookie.match(new RegExp(`(?:^|;\\s*)${MOBILE_KEY}=([^;]+)`));
+  if (match) return decodeURIComponent(match[1]);
+  try {
+    return localStorage.getItem('dreamlabs_mobile') || '';
+  } catch {
+    return '';
+  }
+}
+
+function setSavedMobile(mobile: string) {
+  if (typeof document === 'undefined') return;
+  const expires = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toUTCString();
+  document.cookie = `${MOBILE_KEY}=${encodeURIComponent(mobile)}; expires=${expires}; path=/; SameSite=Lax`;
+}
+
+function clearSavedMobile() {
+  if (typeof document === 'undefined') return;
+  document.cookie = `${MOBILE_KEY}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; SameSite=Lax`;
+  try {
+    localStorage.removeItem('dreamlabs_mobile');
+    localStorage.removeItem('dreamlabs_account');
+  } catch {
+    // ignore
+  }
+}
+
+export default function NetflixHouseholdUpdater() {
+  const [activeTab, setActiveTab] = useState<FlowTab>('household');
   const [mobileNumber, setMobileNumber] = useState('');
-  const [selectedAccount, setSelectedAccount] = useState<number | null>(null);
-  const [status, setStatus] = useState<Status>('idle');
+  const [tvCode, setTvCode] = useState('');
+  const [isSaved, setIsSaved] = useState(false);
+  const [status, setStatus] = useState<PageStatus>('idle');
+  const [loadingText, setLoadingText] = useState('');
+  const [isClient, setIsClient] = useState(false);
+
   const [netflixLink, setNetflixLink] = useState<string | null>(null);
+  const [quota, setQuota] = useState<CustomerQuota | null>(null);
+
   const [errorMessage, setErrorMessage] = useState('');
-  const [mounted, setMounted] = useState(false);
+  const [whatsAppUrl, setWhatsAppUrl] = useState('');
 
-  // On mount - load saved preferences from localStorage
   useEffect(() => {
-    setMounted(true);
-    const savedMobile = localStorage.getItem('dreamlabs_mobile');
-    const savedAccount = localStorage.getItem('dreamlabs_account');
-
-    if (savedMobile) setMobileNumber(savedMobile);
-    if (savedAccount) {
-      const num = parseInt(savedAccount);
-      if (num >= 1 && num <= 5) setSelectedAccount(num);
+    setIsClient(true);
+    const saved = getSavedMobile();
+    if (/^\d{10}$/.test(saved)) {
+      setMobileNumber(saved);
+      setIsSaved(true);
+      setSavedMobile(saved);
     }
   }, []);
 
-  const handleCheckPermission = async () => {
-    if (mobileNumber.length !== 10 || selectedAccount === null) return;
-
-    // Save preferences to localStorage
-    localStorage.setItem('dreamlabs_mobile', mobileNumber);
-    localStorage.setItem('dreamlabs_account', String(selectedAccount));
-
-    setStatus('verifying');
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-
-    setStatus('fetching');
-    try {
-      const res = await fetchLatestNetflixLink(selectedAccount, 30);
-      if (res.success && res.url) {
-        setNetflixLink(res.url);
-        setStatus('success');
-      } else {
-        setErrorMessage(res.message || 'An error occurred');
-        setStatus('error');
-      }
-    } catch (error) {
-      setErrorMessage(
-        'Service is temporarily unavailable. Please try again shortly.'
-      );
-      setStatus('error');
+  const handleMobileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = e.target.value.replace(/\D/g, '').slice(0, 10);
+    setMobileNumber(value);
+    if (value.length === 10) {
+      setSavedMobile(value);
+      setIsSaved(true);
     }
+  };
+
+  const handleClearSaved = () => {
+    clearSavedMobile();
+    setMobileNumber('');
+    setIsSaved(false);
+    setStatus('idle');
+  };
+
+  const handleTvCodeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setTvCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8));
   };
 
   const handleReset = () => {
     setStatus('idle');
+    setTvCode('');
     setNetflixLink(null);
     setErrorMessage('');
+    setWhatsAppUrl('');
   };
 
-  if (!mounted) return null;
+  const showError = (message: string, url?: string) => {
+    setErrorMessage(message);
+    setWhatsAppUrl(url || whatsappLink(mobileNumber, message));
+    setStatus('error');
+  };
+
+  // 1. TV login: the server confirms the code on Netflix as the customer's own account
+  const handleTvLoginSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (mobileNumber.length !== 10 || tvCode.length < 4) return;
+
+    setSavedMobile(mobileNumber);
+    setIsSaved(true);
+    setStatus('loading');
+    setLoadingText('Confirming your TV code with Netflix... this can take up to 20 seconds');
+    setErrorMessage('');
+
+    try {
+      const res = await fetch('/api/activate-tv', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mobile: mobileNumber, code: tvCode }),
+      });
+      const data = await res.json();
+
+      if (!res.ok || !data.success) {
+        showError(data.message || 'Failed to activate TV login', data.whatsappUrl);
+        return;
+      }
+
+      setQuota({ currentCount: data.currentCount || 1, maxCount: data.maxCount || 2 });
+      setStatus('tv_success');
+    } catch (err: any) {
+      showError(err.message || 'Network error while activating TV');
+    }
+  };
+
+  // 2. Household update: unlimited, no code needed
+  const handleHouseholdSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (mobileNumber.length !== 10) return;
+
+    setSavedMobile(mobileNumber);
+    setIsSaved(true);
+    setStatus('loading');
+    setLoadingText('Fetching latest update link...');
+    setErrorMessage('');
+
+    // The server checks the subscription, finds the customer's own Netflix inbox and logs the update.
+    const response = await fetchLatestNetflixLink(mobileNumber, 30);
+    if (response.success && response.link) {
+      setNetflixLink(response.link);
+      setStatus('household_success');
+    } else {
+      showError(response.message || 'Failed to fetch Netflix update link', response.whatsappUrl);
+    }
+  };
+
+  if (!isClient) return null;
+
+  const savedBadge = isSaved && (
+    <div className="flex items-center gap-2">
+      <span className="text-[11px] text-green-400 flex items-center gap-1 font-medium">
+        <CheckCircle2 className="w-3 h-3" /> Saved on device
+      </span>
+      <button
+        type="button"
+        onClick={handleClearSaved}
+        className="text-[11px] text-netflix-red hover:underline cursor-pointer font-medium"
+      >
+        Not you? Clear
+      </button>
+    </div>
+  );
+
+  const mobileInput = (id: string) => (
+    <div className="relative">
+      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-netflix-muted font-mono text-sm">+91</span>
+      <Input
+        id={id}
+        type="tel"
+        inputMode="numeric"
+        placeholder="Enter 10-digit mobile number"
+        value={mobileNumber}
+        onChange={handleMobileChange}
+        className="bg-netflix-input border-netflix-border text-white placeholder:text-netflix-muted focus:ring-netflix-red focus:border-netflix-red h-12 text-base pl-12 font-mono"
+        maxLength={10}
+        required
+      />
+    </div>
+  );
 
   return (
-    <div className="bg-[#141414] min-h-screen flex flex-col items-center justify-center p-4">
-      {/* Header */}
-      <div className="text-center mb-8">
-        <h1 className="text-3xl font-bold text-white">Dream Labs Solutions</h1>
-        <h2 className="text-2xl font-semibold text-[#E50914] mt-2">
-          Netflix Household Updater
-        </h2>
-        <p className="text-sm text-[#999999] mt-2">
-          Verify your access and update your devices
-        </p>
-      </div>
+    <div className="min-h-screen bg-netflix-dark flex flex-col items-center justify-center p-4 relative overflow-hidden font-sans">
+      {/* Ambient gradient background */}
+      <div className="absolute inset-0 bg-gradient-to-br from-netflix-dark via-netflix-darker to-black opacity-80 pointer-events-none" />
+      <div className="absolute top-0 right-0 w-96 h-96 bg-netflix-red opacity-5 rounded-full blur-3xl pointer-events-none" />
+      <div className="absolute bottom-0 left-0 w-96 h-96 bg-netflix-red opacity-5 rounded-full blur-3xl pointer-events-none" />
 
-      {/* Main Card */}
-      <div className="max-w-[800px] w-full bg-[#1f1f1f] border border-[#333333] rounded-xl p-8">
-        <div className="flex flex-col md:flex-row gap-6">
-          {/* Left Panel - Account Selection */}
-          <div className="w-full md:w-[35%]">
-            <div className="text-sm font-medium text-[#999999] mb-3">
-              Select Account
-            </div>
-            <div className="space-y-2">
-              {[1, 2, 3, 4, 5].map((accountNum) => (
-                <button
-                  key={accountNum}
-                  onClick={() => setSelectedAccount(accountNum)}
-                  className={`w-full text-left px-4 py-3 rounded-lg transition-all duration-200 ${selectedAccount === accountNum
-                      ? 'bg-[#2a1a1a] border-t border-r border-b border-[#E50914]/50 border-l-4 border-l-[#E50914] text-white font-bold shadow-[0_0_12px_rgba(229,9,20,0.3)] cursor-pointer'
-                      : 'bg-[#141414] border border-[#333333] text-[#999999] hover:border-[#E50914]/50 hover:bg-[#1a1a1a] cursor-pointer'
-                    }`}
-                >
-                  Account {accountNum}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Vertical Divider */}
-          <div className="w-px bg-[#333333] self-stretch hidden md:block" />
-
-          {/* Right Panel - Dynamic Content */}
-          <div className="flex-1">
-            {status === 'idle' && (
-              <>
-                <label className="text-sm text-[#999999] mb-1 block">
-                  Mobile Number
-                </label>
-                <input
-                  type="tel"
-                  value={mobileNumber}
-                  onChange={(e) => {
-                    const digits = e.target.value.replace(/\D/g, '');
-                    setMobileNumber(digits.slice(0, 10));
-                  }}
-                  className="w-full bg-[#141414] border border-[#333333] text-white rounded-lg px-4 py-3 focus:outline-none focus:border-[#E50914] focus:ring-1 focus:ring-[#E50914]"
-                  placeholder="Enter 10-digit mobile number"
-                />
-                <p className="text-xs text-[#999999] mt-1">
-                  {mobileNumber.length}/10 digits
-                </p>
-                <button
-                  onClick={handleCheckPermission}
-                  disabled={mobileNumber.length !== 10 || selectedAccount === null}
-                  className="w-full mt-4 bg-[#E50914] hover:bg-[#C40812] text-white font-semibold py-3 rounded-lg transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  Check Permission
-                </button>
-              </>
-            )}
-
-            {status === 'verifying' && (
-              <div className="flex flex-col items-center justify-center h-40">
-                <Loader className="w-10 h-10 text-[#E50914] animate-spin" />
-                <p className="text-white mt-4">Verifying your access...</p>
-              </div>
-            )}
-
-            {status === 'fetching' && (
-              <div className="flex flex-col items-center justify-center h-40">
-                <CheckCircle2 className="w-10 h-10 text-green-500" />
-                <p className="text-green-500 font-semibold mt-2">
-                  ✓ Access Verified!
-                </p>
-                <div className="flex items-center gap-2 mt-3">
-                  <Loader className="w-5 h-5 text-white animate-spin" />
-                  <p className="text-white">Fetching latest update link...</p>
-                </div>
-              </div>
-            )}
-
-            {status === 'success' && (
-              <div className="flex flex-col items-center justify-center h-auto">
-                <CheckCircle2 className="w-16 h-16 text-green-500" />
-                <p className="text-2xl font-bold text-white mt-3">
-                  Access Verified!
-                </p>
-                <p className="text-sm text-[#999999] mt-1">
-                  Click below to verify your device with Netflix
-                </p>
-                <button
-                  onClick={() => {
-                    if (netflixLink) {
-                      window.open(netflixLink, '_blank', 'noopener,noreferrer');
-                    }
-                  }}
-                  className="w-full mt-6 bg-[#E50914] hover:bg-[#C40812] text-white font-semibold py-3 rounded-lg flex items-center justify-center gap-2 transition-all duration-200"
-                >
-                  Update My Device
-                  <ExternalLink className="w-4 h-4" />
-                </button>
-                <button
-                  onClick={handleReset}
-                  className="w-full mt-2 text-[#999999] hover:text-white py-2 rounded-lg transition-colors"
-                >
-                  <ArrowLeft className="w-4 h-4 inline mr-2" />
-                  Check Another Number
-                </button>
-              </div>
-            )}
-
-            {status === 'error' && (
-              <div className="flex flex-col items-center justify-center h-auto">
-                <AlertTriangle className="w-16 h-16 text-yellow-500" />
-                <p className="text-xl font-bold text-white mt-3">
-                  ⚠ Error Fetching Link
-                </p>
-                <p className="text-sm text-[#999999] mt-2 text-center max-w-xs">
-                  {errorMessage}
-                </p>
-                <div className="flex gap-3 mt-6 w-full">
-                  <button
-                    onClick={handleCheckPermission}
-                    className="flex-1 bg-[#E50914] hover:bg-[#C40812] text-white font-semibold py-2 rounded-lg transition-all duration-200"
-                  >
-                    Retry
-                  </button>
-                  <button
-                    onClick={handleReset}
-                    className="flex-1 border border-[#333333] text-white hover:bg-[#333333] font-semibold py-2 rounded-lg transition-all duration-200"
-                  >
-                    <ArrowLeft className="w-4 h-4 inline mr-2" />
-                    Back
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
+      <div className="relative z-10 w-full max-w-md">
+        {/* Header */}
+        <div className="text-center mb-6 animate-fade-in">
+          <h1 className="text-3xl md:text-4xl font-bold text-white leading-tight">{COMPANY_NAME}</h1>
+          <h2 className="text-2xl md:text-3xl font-semibold text-netflix-red mt-1 mb-2">Netflix Household Updater</h2>
+          <p className="text-netflix-gray text-sm md:text-base">Verify your access and update your devices</p>
         </div>
-      </div>
 
-      {/* Footer */}
-      <div className="mt-6 text-center text-xs text-[#999999]">
-        For authorized users only • Dream Labs Solutions
+        <Card className="bg-netflix-card border-netflix-border backdrop-blur-sm shadow-2xl p-6 md:p-8 rounded-xl">
+          {/* TAB SWITCHER */}
+          <div className="grid grid-cols-2 p-1 bg-netflix-dark/80 rounded-xl border border-netflix-border mb-6">
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab('household');
+                handleReset();
+              }}
+              className={`py-2.5 px-3 rounded-lg text-xs font-semibold flex items-center justify-center gap-2 transition-all cursor-pointer ${
+                activeTab === 'household'
+                  ? 'bg-netflix-red text-white shadow-md shadow-netflix-red/30'
+                  : 'text-netflix-gray hover:text-white'
+              }`}
+            >
+              <ExternalLink className="w-4 h-4" /> Update Household
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab('tv_login');
+                handleReset();
+              }}
+              className={`py-2.5 px-3 rounded-lg text-xs font-semibold flex items-center justify-center gap-2 transition-all cursor-pointer ${
+                activeTab === 'tv_login'
+                  ? 'bg-netflix-red text-white shadow-md shadow-netflix-red/30'
+                  : 'text-netflix-gray hover:text-white'
+              }`}
+            >
+              <Tv className="w-4 h-4" /> TV Login
+            </button>
+          </div>
+
+          {/* LOADING STATE */}
+          {status === 'loading' && (
+            <div className="flex flex-col items-center justify-center py-10 space-y-4 animate-fade-in">
+              <Loader2 className="w-12 h-12 text-netflix-red animate-spin" />
+              <p className="text-netflix-light text-base font-medium text-center">{loadingText}</p>
+              <p className="text-netflix-muted text-xs text-center">Please wait a few seconds...</p>
+            </div>
+          )}
+
+          {/* ERROR SCREEN WITH WHATSAPP BUTTON */}
+          {status === 'error' && (
+            <div className="space-y-6 animate-fade-in">
+              <div className="text-center space-y-3">
+                <AlertTriangle className="w-16 h-16 text-yellow-500 mx-auto" />
+                <h3 className="text-xl font-bold text-white">Action Could Not Be Completed</h3>
+                <p className="text-netflix-gray text-sm leading-relaxed">{errorMessage}</p>
+              </div>
+
+              <a
+                href={whatsAppUrl || whatsappLink(mobileNumber, errorMessage)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="w-full bg-[#25D366] hover:bg-[#20ba59] text-white font-semibold h-13 text-sm rounded-lg transition-all duration-200 shadow-lg flex items-center justify-center gap-2.5 cursor-pointer py-3.5"
+              >
+                <MessageCircle className="w-5 h-5 fill-white" />
+                Contact on WhatsApp
+              </a>
+
+              <Button
+                onClick={handleReset}
+                variant="outline"
+                className="w-full border-netflix-border text-netflix-light hover:text-white hover:bg-netflix-input/50 h-11 bg-transparent cursor-pointer flex items-center justify-center gap-2"
+              >
+                <RotateCcw className="w-4 h-4" />
+                Try Again
+              </Button>
+            </div>
+          )}
+
+          {/* TV LOGIN SUCCESS SCREEN */}
+          {status === 'tv_success' && (
+            <div className="space-y-6 animate-fade-in">
+              <div className="text-center space-y-3">
+                <CheckCircle2 className="w-16 h-16 text-green-500 mx-auto" />
+                <h3 className="text-2xl font-bold text-white">TV Signed In!</h3>
+                <p className="text-netflix-gray text-sm">
+                  Netflix confirmed your code. Your TV is now signed in to your Netflix account.
+                </p>
+                {quota && (
+                  <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-netflix-dark/80 border border-netflix-border text-xs text-netflix-light">
+                    <Clock className="w-3.5 h-3.5 text-netflix-red" />
+                    <span>
+                      TV login {quota.currentCount} of {quota.maxCount} used this calendar month
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              <div className="bg-netflix-dark/60 border border-netflix-border rounded-xl p-4 text-xs space-y-2">
+                <p className="font-semibold text-white flex items-center gap-1.5 text-xs">
+                  <ShieldCheck className="w-4 h-4 text-green-400" /> What happens now:
+                </p>
+                <ol className="text-netflix-muted space-y-1.5 list-decimal list-inside leading-relaxed text-[11px]">
+                  <li>Your TV screen should change within a few seconds.</li>
+                  <li>Choose your profile on the TV and start watching.</li>
+                  <li>
+                    If the TV still shows the code after 30 seconds, tap &ldquo;Contact on WhatsApp&rdquo; and send us your
+                    number.
+                  </li>
+                </ol>
+              </div>
+
+              <Button
+                onClick={handleReset}
+                variant="outline"
+                className="w-full border-netflix-border text-white hover:bg-netflix-input/50 h-11 bg-transparent cursor-pointer"
+              >
+                <ArrowLeft className="w-4 h-4 mr-2" />
+                Back to Home
+              </Button>
+            </div>
+          )}
+
+          {/* HOUSEHOLD SUCCESS SCREEN */}
+          {status === 'household_success' && (
+            <div className="space-y-6 animate-fade-in">
+              <div className="text-center space-y-3">
+                <CheckCircle2 className="w-16 h-16 text-green-500 mx-auto" />
+                <h3 className="text-2xl font-bold text-white">Access Verified!</h3>
+                <p className="text-netflix-gray text-sm">Click below to verify your device with Netflix</p>
+              </div>
+
+              <Button
+                onClick={() => {
+                  if (netflixLink) window.open(netflixLink, '_blank', 'noopener,noreferrer');
+                }}
+                className="w-full bg-netflix-red hover:bg-netflix-red-hover text-white font-semibold h-14 text-base rounded-lg transition-all duration-200 shadow-lg hover:shadow-netflix-red/50 hover:scale-[1.02] active:scale-[0.98] flex items-center justify-center gap-2 cursor-pointer"
+              >
+                Update My Device
+                <ExternalLink className="w-5 h-5" />
+              </Button>
+
+              <Button
+                onClick={handleReset}
+                variant="ghost"
+                className="w-full text-netflix-gray hover:text-white hover:bg-netflix-input/50 h-11 cursor-pointer"
+              >
+                <ArrowLeft className="w-4 h-4 mr-2" />
+                Check Another Number
+              </Button>
+            </div>
+          )}
+
+          {/* HOUSEHOLD FORM */}
+          {status === 'idle' && activeTab === 'household' && (
+            <form onSubmit={handleHouseholdSubmit} className="space-y-6 animate-fade-in">
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between text-xs">
+                  <label htmlFor="household-mobile" className="font-medium text-netflix-light">
+                    Mobile Number
+                  </label>
+                  {savedBadge}
+                </div>
+                {mobileInput('household-mobile')}
+                <p className="text-xs text-netflix-muted">
+                  {mobileNumber.length}/10 digits &mdash; household update has no monthly limit.
+                </p>
+              </div>
+
+              <Button
+                type="submit"
+                disabled={mobileNumber.length !== 10}
+                className="w-full bg-netflix-red hover:bg-netflix-red-hover text-white font-semibold h-12 text-base rounded-lg transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-netflix-red/50 flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <ExternalLink className="w-5 h-5" />
+                Check Permission
+              </Button>
+
+              <div className="bg-netflix-dark/60 border border-netflix-border/80 rounded-xl p-4 text-xs space-y-2">
+                <p className="font-semibold text-white flex items-center gap-1.5 text-xs">
+                  <ExternalLink className="w-4 h-4 text-netflix-red" /> How household update works:
+                </p>
+                <ol className="text-netflix-muted space-y-1.5 list-decimal list-inside leading-relaxed text-[11px]">
+                  <li>
+                    On your TV or phone, choose <strong className="text-netflix-light">&ldquo;Update Primary Location&rdquo;</strong>{' '}
+                    so Netflix sends the email.
+                  </li>
+                  <li>
+                    Enter your number and tap <strong className="text-netflix-light">&ldquo;Check Permission&rdquo;</strong>.
+                  </li>
+                  <li>
+                    Tap <strong className="text-netflix-light">&ldquo;Update My Device&rdquo;</strong> and confirm on Netflix.
+                  </li>
+                </ol>
+              </div>
+            </form>
+          )}
+
+          {/* TV LOGIN FORM */}
+          {status === 'idle' && activeTab === 'tv_login' && (
+            <form onSubmit={handleTvLoginSubmit} className="space-y-5 animate-fade-in">
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between text-xs">
+                  <label htmlFor="mobile" className="font-medium text-netflix-light">
+                    Mobile Number
+                  </label>
+                  {savedBadge}
+                </div>
+                {mobileInput('mobile')}
+              </div>
+
+              <div className="space-y-1.5">
+                <label htmlFor="tvcode" className="text-xs font-medium text-netflix-light uppercase tracking-wider block">
+                  Netflix TV Code
+                </label>
+                <Input
+                  id="tvcode"
+                  type="text"
+                  placeholder="e.g. 48291048"
+                  value={tvCode}
+                  onChange={handleTvCodeChange}
+                  className="bg-netflix-input border-netflix-border text-white placeholder:text-netflix-muted focus:ring-netflix-red focus:border-netflix-red h-13 text-center font-mono text-xl tracking-widest uppercase"
+                  maxLength={8}
+                  required
+                />
+                <p className="text-[11px] text-netflix-muted text-center">Shown on your TV screen (e.g. at netflix.com/tv2)</p>
+              </div>
+
+              <Button
+                type="submit"
+                disabled={mobileNumber.length !== 10 || tvCode.length < 4}
+                className="w-full bg-netflix-red hover:bg-netflix-red-hover text-white font-semibold h-12 text-base rounded-lg transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-netflix-red/50 flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <Tv className="w-5 h-5" />
+                Activate TV Login
+              </Button>
+
+              <div className="flex items-center justify-between text-[11px] text-netflix-muted pt-1 px-1">
+                <span>Monthly TV login limit applies</span>
+                <span>Resets 1st of each month</span>
+              </div>
+
+              <div className="bg-netflix-dark/60 border border-netflix-border/80 rounded-xl p-4 text-xs space-y-2 mt-4">
+                <p className="font-semibold text-white flex items-center gap-1.5 text-xs">
+                  <Tv className="w-4 h-4 text-netflix-red" /> How to log in on your TV:
+                </p>
+                <ol className="text-netflix-muted space-y-1.5 list-decimal list-inside leading-relaxed text-[11px]">
+                  <li>
+                    <strong className="text-netflix-light">Open the Netflix app</strong> on your Smart TV.
+                  </li>
+                  <li>
+                    Click <strong className="text-netflix-light">&ldquo;Sign In&rdquo;</strong> to view your TV activation code.
+                  </li>
+                  <li>Enter your registered mobile number and the TV code above.</li>
+                  <li>
+                    Click <strong className="text-netflix-light">&ldquo;Activate TV Login&rdquo;</strong> to pair your device.
+                  </li>
+                  <li>Your TV will sign in automatically &mdash; choose your profile and enjoy streaming!</li>
+                </ol>
+              </div>
+            </form>
+          )}
+        </Card>
+
+        <div className="mt-6 text-center text-xs text-netflix-muted">For authorized users only &bull; {COMPANY_NAME}</div>
       </div>
     </div>
   );

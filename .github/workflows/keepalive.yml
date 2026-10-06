@@ -1,0 +1,31 @@
+# Netflix cookie keepalive every 6 hours.
+# Vercel's Hobby plan only allows a daily cron (a 6-hourly one makes every
+# deploy fail), so the 6-hour schedule runs here and calls the app.
+#
+# Setup: repo Settings > Secrets and variables > Actions
+#   secret   CRON_SECRET     same value as CRON_SECRET in Vercel
+#   variable KEEPALIVE_URL   https://<your-vercel-domain>/api/cron/keepalive-cookies
+name: Netflix keepalive
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Call keepalive endpoint
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          URL: ${{ vars.KEEPALIVE_URL }}
+        run: |
+          if [ -z "$CRON_SECRET" ]; then echo "CRON_SECRET secret is not set"; exit 1; fi
+          if [ -z "$URL" ]; then echo "KEEPALIVE_URL variable is not set"; exit 1; fi
+          status=$(curl -sS -o response.json -w '%{http_code}' --max-time 90 \
+            -H "Authorization: Bearer $CRON_SECRET" "$URL")
+          echo "HTTP $status"
+          jq '{ok, total, working, renewedTokens, message, results: [.results[]? | {name, status, renewedCount}]}' response.json || cat response.json
+          test "$status" = "200"
