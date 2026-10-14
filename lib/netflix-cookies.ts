@@ -50,6 +50,55 @@ export function isNetflixDomain(domain?: string): boolean {
   return NETFLIX_DOMAINS.some((t) => d === t || d.endsWith('.' + t));
 }
 
+/**
+ * The two cookies that carry the Netflix login. Every other cookie is a helper
+ * (device id, analytics, a 24-hour `gsid`, ...) whose short expiry says nothing
+ * about how long the login lasts.
+ */
+export const AUTH_COOKIE_NAMES = ['NetflixId', 'SecureNetflixId'];
+
+/** Login cookies that run out within this long count as "expiring soon". */
+export const EXPIRING_SOON_MS = 7 * 24 * 60 * 60 * 1000;
+
+export function isAuthCookie(name: string): boolean {
+  return AUTH_COOKIE_NAMES.includes(name);
+}
+
+/** True when the cookie has an expiry date and it has passed (session cookies never expire here). */
+export function isCookieExpired(c: BrowserCookie, nowMs: number = Date.now()): boolean {
+  return typeof c.expirationDate === 'number' && c.expirationDate > 0 && c.expirationDate * 1000 <= nowMs;
+}
+
+export interface LoginExpiry {
+  /** Earliest expiry (epoch seconds) of the login cookies; null when they are session cookies. */
+  earliest: number | null;
+  earliestIso: string | null;
+  /** The login cookies' own expiry date is in the past. */
+  pastExpiry: boolean;
+  /** The login cookies run out within EXPIRING_SOON_MS (and have not passed already). */
+  expiringSoon: boolean;
+}
+
+/**
+ * When the *login* runs out, judged only from NetflixId / SecureNetflixId.
+ * Taking the earliest expiry over all cookies would let a one-day helper cookie
+ * mark a healthy, year-long session as expiring (or expired) every single day.
+ */
+export function loginExpiry(cookies: BrowserCookie[], nowMs: number = Date.now()): LoginExpiry {
+  const expiries = cookies
+    .filter((c) => isAuthCookie(c.name) && (isNetflixDomain(c.domain) || !c.domain))
+    .map((c) => c.expirationDate)
+    .filter((e): e is number => typeof e === 'number' && e > 0);
+  const earliest = expiries.length ? Math.min(...expiries) : null;
+  const pastExpiry = earliest !== null && earliest * 1000 <= nowMs;
+  return {
+    earliest,
+    earliestIso: earliest !== null ? new Date(earliest * 1000).toISOString() : null,
+    pastExpiry,
+    expiringSoon: earliest !== null && !pastExpiry && earliest * 1000 - nowMs < EXPIRING_SOON_MS,
+  };
+}
+
 export function parseCookieJson(raw: string): CookieParseResult {
   const empty: CookieParseResult = {
     ok: false,
@@ -116,21 +165,14 @@ export function parseCookieJson(raw: string): CookieParseResult {
   const hasNetflixId = names.has('NetflixId');
   const hasSecureNetflixId = names.has('SecureNetflixId');
 
-  const expiries = source
-    .map((c) => c.expirationDate)
-    .filter((e): e is number => typeof e === 'number' && e > 0);
-
-  const earliestExpiry = expiries.length ? Math.min(...expiries) : null;
-  const now = Date.now();
-  const isLocallyExpired = earliestExpiry !== null && earliestExpiry * 1000 < now;
-
-  const earliestExpiryIso = earliestExpiry ? new Date(earliestExpiry * 1000).toISOString() : null;
+  // Only the login cookies decide when the session ends (see loginExpiry).
+  const { earliest: earliestExpiry, earliestIso: earliestExpiryIso, pastExpiry } = loginExpiry(source);
 
   return {
     ok: true,
     cookies,
     count: cookies.length,
-    status: isLocallyExpired ? 'expired' : 'active',
+    status: pastExpiry ? 'expired' : 'active',
     earliestExpiry,
     earliestExpiryIso,
     hasNetflixId,
@@ -141,9 +183,11 @@ export function parseCookieJson(raw: string): CookieParseResult {
 /**
  * Builds standard Cookie header string: "name1=val1; name2=val2; ..."
  */
-export function buildCookieHeader(cookies: BrowserCookie[]): string {
+export function buildCookieHeader(cookies: BrowserCookie[], nowMs: number = Date.now()): string {
   return cookies
-    .filter((c) => c.name && c.value)
+    // A browser would not send a helper cookie past its expiry. The login cookies are always sent:
+    // Netflix decides on its side whether they are still good.
+    .filter((c) => c.name && c.value && (isAuthCookie(c.name) || !isCookieExpired(c, nowMs)))
     .map((c) => `${c.name}=${c.value}`)
     .join('; ');
 }
@@ -160,12 +204,7 @@ export async function testNetflixCookies(cookies: BrowserCookie[]): Promise<Cook
   const hasNetflixId = names.has('NetflixId');
   const hasSecureNetflixId = names.has('SecureNetflixId');
 
-  const expiries = source
-    .map((c) => c.expirationDate)
-    .filter((e): e is number => typeof e === 'number' && e > 0);
-  const earliestExpiry = expiries.length ? Math.min(...expiries) : null;
-  const earliestExpiryIso = earliestExpiry ? new Date(earliestExpiry * 1000).toISOString() : null;
-  const isLocallyExpired = earliestExpiry !== null && earliestExpiry * 1000 < Date.now();
+  const { earliestIso: earliestExpiryIso, pastExpiry: isLocallyExpired } = loginExpiry(source);
 
   const diagnostics = {
     totalCookies: cookies.length,

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { deleteAccount, saveAccount, AccountStatus } from '@/lib/store';
 import { adminRoute } from '@/lib/api-response';
-import { parseCookieJson, BrowserCookie } from '@/lib/netflix-cookies';
+import { parseCookieJson, loginExpiry, BrowserCookie } from '@/lib/netflix-cookies';
 
 const DEFAULT_USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
@@ -24,17 +24,10 @@ export const POST = adminRoute(async (request: NextRequest) => {
     return NextResponse.json({ ok: false, message: 'Please provide valid cookie data' }, { status: 400 });
   }
 
-  const expiries = parsed
-    .map((c) => c.expirationDate)
-    .filter((e): e is number => typeof e === 'number' && e > 0);
-  const earliest = expiries.length ? Math.min(...expiries) * 1000 : null;
-  const now = Date.now();
-  const status: AccountStatus =
-    earliest !== null && earliest < now
-      ? 'expired'
-      : earliest !== null && earliest - now < 7 * 24 * 60 * 60 * 1000
-        ? 'expiring_soon'
-        : 'live';
+  // Only NetflixId / SecureNetflixId decide when the login ends. Netflix also sets short-lived helper
+  // cookies (a 24-hour `gsid`, ...) that must not make a year-long session look like it is expiring.
+  const login = loginExpiry(parsed);
+  const status: AccountStatus = login.pastExpiry ? 'expired' : login.expiringSoon ? 'expiring_soon' : 'live';
 
   // The user-agent the cookies were exported with: Netflix ties sessions to it.
   const ua = (typeof userAgent === 'string' && userAgent.trim()) || request.headers.get('user-agent') || DEFAULT_USER_AGENT;
@@ -49,7 +42,7 @@ export const POST = adminRoute(async (request: NextRequest) => {
       deviceMetadata: deviceMetadata || (id ? undefined : { platform: 'web', importedAt: new Date().toISOString() }),
       cookies: parsed,
       status,
-      earliestExpiryIso: earliest ? new Date(earliest).toISOString() : null,
+      earliestExpiryIso: login.earliestIso,
     },
     id || undefined
   );

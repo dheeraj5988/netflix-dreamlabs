@@ -1,4 +1,4 @@
-import { BrowserCookie, buildCookieHeader } from './netflix-cookies';
+import { BrowserCookie, buildCookieHeader, isAuthCookie, isCookieExpired, loginExpiry } from './netflix-cookies';
 import { NetflixAccount, saveAccountHealth } from './store';
 
 export interface KeepaliveReport {
@@ -35,7 +35,8 @@ export function parseSetCookieHeader(setCookieStr: string): BrowserCookie | null
 
     let domain: string | undefined = undefined;
     let path: string | undefined = '/';
-    let expirationDate: number | undefined = undefined;
+    let expires: number | undefined = undefined;
+    let maxAge: number | undefined = undefined;
     let secure = false;
     let httpOnly = false;
 
@@ -49,12 +50,14 @@ export function parseSetCookieHeader(setCookieStr: string): BrowserCookie | null
         const expStr = attr.slice(8).trim();
         const parsedTime = Date.parse(expStr);
         if (!isNaN(parsedTime)) {
-          expirationDate = Math.floor(parsedTime / 1000);
+          // `Expires=Thu, 01 Jan 1970` is how a cookie is deleted. Keep it above 0 so it is not mistaken for
+          // "no expiry date" (a session cookie).
+          expires = Math.max(1, Math.floor(parsedTime / 1000));
         }
       } else if (lower.startsWith('max-age=')) {
         const sec = parseInt(attr.slice(8).trim(), 10);
         if (!isNaN(sec)) {
-          expirationDate = Math.floor(Date.now() / 1000) + sec;
+          maxAge = sec;
         }
       } else if (lower === 'secure') {
         secure = true;
@@ -62,6 +65,9 @@ export function parseSetCookieHeader(setCookieStr: string): BrowserCookie | null
         httpOnly = true;
       }
     }
+
+    // Max-Age wins over Expires (RFC 6265), whatever order Netflix lists them in.
+    const expirationDate = maxAge !== undefined ? Math.floor(Date.now() / 1000) + maxAge : expires;
 
     return {
       name,
@@ -97,6 +103,14 @@ export function mergeUpdatedCookies(
     const parsed = parseSetCookieHeader(str);
     if (!parsed) continue;
 
+    // Netflix clears a cookie with an empty value or a past expiry. Drop a helper cookie like a
+    // browser would, but never let a header erase a stored login cookie: whether the session still
+    // works is decided by Netflix's answer to the live check, not by a header we cannot verify.
+    if (!parsed.value || isCookieExpired(parsed)) {
+      if (!isAuthCookie(parsed.name)) cookieMap.delete(parsed.name);
+      continue;
+    }
+
     const prev = cookieMap.get(parsed.name);
     if (!prev || prev.value !== parsed.value) {
       renewedCount++;
@@ -113,17 +127,23 @@ export function mergeUpdatedCookies(
     });
   }
 
-  return {
-    merged: Array.from(cookieMap.values()),
-    renewedCount,
-  };
+  // Helper cookies that have run out (e.g. a stale 24-hour `gsid`) are dead weight: a browser would not send them.
+  const nowMs = Date.now();
+  const merged = Array.from(cookieMap.values()).filter((c) => isAuthCookie(c.name) || !isCookieExpired(c, nowMs));
+
+  return { merged, renewedCount };
 }
 
 /**
  * Validates and keeps an individual Netflix account session alive.
  * - Pings Netflix with the account's bound User-Agent.
  * - Captures updated Set-Cookie tokens from Netflix response.
- * - Detects live / expiring_soon / needs_reimport / expired statuses.
+ * - Detects live / expiring_soon / needs_reimport / unverified statuses.
+ *
+ * Netflix is the authority on whether a login still works, so the check always asks Netflix. The
+ * expiry dates stored in the cookies are only used to warn early, and only the login cookies
+ * (NetflixId / SecureNetflixId) count: Netflix also sets a 24-hour `gsid` and other short-lived helper
+ * cookies that say nothing about the session.
  */
 export async function runAccountKeepalive(account: NetflixAccount): Promise<KeepaliveReport> {
   const checkedAt = new Date().toISOString();
@@ -152,29 +172,13 @@ export async function runAccountKeepalive(account: NetflixAccount): Promise<Keep
     };
   }
 
-  // 2. Check local cookie expiry
-  const expiries = cookies
-    .map((c) => c.expirationDate)
-    .filter((e): e is number => typeof e === 'number' && e > 0);
-  const earliestExpiry = expiries.length ? Math.min(...expiries) : null;
-  const earliestExpiryIso = earliestExpiry ? new Date(earliestExpiry * 1000).toISOString() : null;
+  // 2. When do the login cookies run out? (Informational: Netflix decides below.)
   const nowMs = Date.now();
-  const isLocallyExpired = earliestExpiry !== null && earliestExpiry * 1000 < nowMs;
-
-  if (isLocallyExpired) {
-    return {
-      ok: false,
-      status: 'expired',
-      message: 'Netflix cookies are expired',
-      detail: `Cookies expired on ${earliestExpiryIso ? new Date(earliestExpiryIso).toLocaleDateString('en-IN') : 'unknown'}. Re-import required.`,
-      checkedAt,
-      refreshedAt: account.lastRefreshedAt || null,
-      cookiesCount: cookies.length,
-      renewedCount: 0,
-      earliestExpiryIso,
-      updatedCookies: cookies,
-    };
-  }
+  const login = loginExpiry(cookies, nowMs);
+  const earliestExpiryIso = login.earliestIso;
+  const stale = login.pastExpiry
+    ? ` The login cookies passed their expiry date (${new Date(login.earliestIso!).toLocaleDateString('en-IN')}).`
+    : '';
 
   // 3. User-Agent binding: use stored userAgent to prevent session revocation
   const userAgent = account.userAgent?.trim() || DEFAULT_USER_AGENT;
@@ -230,7 +234,7 @@ export async function runAccountKeepalive(account: NetflixAccount): Promise<Keep
         ok: false,
         status: 'unverified',
         message: 'Could not verify with Netflix',
-        detail: `Netflix answered HTTP ${res.status} without a login redirect. The session may still be fine; try again later.`,
+        detail: `Netflix answered HTTP ${res.status} without a login redirect. The session may still be fine; try again later.${stale}`,
         checkedAt,
         refreshedAt: account.lastRefreshedAt || null,
         cookiesCount: cookies.length,
@@ -251,18 +255,12 @@ export async function runAccountKeepalive(account: NetflixAccount): Promise<Keep
 
     const { merged, renewedCount } = mergeUpdatedCookies(cookies, setCookieHeaders);
 
-    // Recalculate expiry with merged cookies
-    const newExpiries = merged
-      .map((c) => c.expirationDate)
-      .filter((e): e is number => typeof e === 'number' && e > 0);
-    const newEarliest = newExpiries.length ? Math.min(...newExpiries) : earliestExpiry;
-    const newEarliestIso = newEarliest ? new Date(newEarliest * 1000).toISOString() : earliestExpiryIso;
+    // Netflix accepted the session. Work out when the login cookies run out after any renewal.
+    const after = loginExpiry(merged, nowMs);
+    // A stored date in the past on a session Netflix still accepts is meaningless: do not show it.
+    const newEarliestIso = after.pastExpiry ? null : after.earliestIso;
 
-    // Check if expiring soon (< 7 days)
-    const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
-    const isExpiringSoon = newEarliest !== null && newEarliest * 1000 - nowMs < sevenDaysMs;
-
-    const finalStatus: 'live' | 'expiring_soon' = isExpiringSoon ? 'expiring_soon' : 'live';
+    const finalStatus: 'live' | 'expiring_soon' = after.expiringSoon ? 'expiring_soon' : 'live';
     const refreshedAt = renewedCount > 0 ? checkedAt : account.lastRefreshedAt || null;
 
     let detail = `Verified with Netflix (HTTP ${res.status}). Session is active`;
@@ -270,13 +268,17 @@ export async function runAccountKeepalive(account: NetflixAccount): Promise<Keep
       detail += ` • Renewed ${renewedCount} session token(s) from Netflix`;
     }
     if (newEarliestIso) {
-      detail += ` • Valid until ${new Date(newEarliestIso).toLocaleDateString('en-IN')}`;
+      detail += ` • Login valid until ${new Date(newEarliestIso).toLocaleDateString('en-IN')}`;
+    } else if (after.pastExpiry) {
+      detail += ' • Netflix still accepts this login although its cookie date has passed';
+    } else {
+      detail += ' • Login cookies have no fixed expiry date';
     }
 
     return {
       ok: true,
       status: finalStatus,
-      message: isExpiringSoon ? 'Session Expiring Soon' : 'Session Live & Kept Alive',
+      message: after.expiringSoon ? 'Session Expiring Soon' : 'Session Live & Kept Alive',
       detail,
       checkedAt,
       refreshedAt,
@@ -290,7 +292,7 @@ export async function runAccountKeepalive(account: NetflixAccount): Promise<Keep
       ok: false,
       status: 'unverified',
       message: 'Could not reach Netflix',
-      detail: `Netflix check failed (${err?.name === 'AbortError' ? 'timeout' : err?.message || 'network error'}). Status unknown until the next check.`,
+      detail: `Netflix check failed (${err?.name === 'AbortError' ? 'timeout' : err?.message || 'network error'}). Status unknown until the next check.${stale}`,
       checkedAt,
       refreshedAt: account.lastRefreshedAt || null,
       cookiesCount: cookies.length,
