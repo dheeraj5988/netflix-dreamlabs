@@ -8,6 +8,11 @@ import { NetflixAccount } from './store';
  * as a signed-in member typing the code on the website:
  *   1. GET  /tv2  with the account cookies -> page contains a one-time authURL
  *   2. POST /tv2  with authURL + code      -> Netflix links the TV
+ *
+ * Netflix serves two versions of the code page:
+ *   - classic: hidden <input name="authURL"> and a field called tvLoginRendezvousCode
+ *   - new (CLCS): no hidden inputs; authURL only inside the embedded page data
+ *     (`"authURL":"...\x2F..."`) and the code field is called rendezvousCode
  */
 
 const TV_URL = 'https://www.netflix.com/tv2';
@@ -47,6 +52,40 @@ function decodeEntities(s: string): string {
 function hiddenInput(html: string, name: string): string | null {
   const m = html.match(new RegExp(`<input[^>]*name="${name}"[^>]*value="([^"]*)"`, 'i'));
   return m ? decodeEntities(m[1]) : null;
+}
+
+function decodeJsEscapes(s: string): string {
+  return s
+    .replace(/\\x([0-9A-Fa-f]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/\\u([0-9A-Fa-f]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/\\\//g, '/');
+}
+
+/** The one-time authURL: classic hidden input first, else the embedded page data of the new page. */
+function extractAuthUrl(html: string): { value: string; from: 'input' | 'page-data' } | null {
+  const input = hiddenInput(html, 'authURL');
+  if (input) return { value: input, from: 'input' };
+  const m = html.match(/"authURL":"([^"]+)"/);
+  return m ? { value: decodeJsEscapes(m[1]), from: 'page-data' } : null;
+}
+
+const usesNewCodeField = (html: string) => /name="rendezvousCode"/.test(html) && !/name="tvLoginRendezvousCode"/.test(html);
+
+/**
+ * Non-secret description of a Netflix page, for the activity log. When Netflix changes the page again
+ * this is what shows what it looks like now (no cookie values, no authURL, no code).
+ */
+/** Screen name of the new page, e.g. RENDEZVOUS_CODE_ENTRY (the code page) or a success screen. */
+function screenName(html: string): string | null {
+  return html.match(/screenName\\*"\s*:\s*\\*"([A-Z_]+)/)?.[1] || null;
+}
+
+function pageFacts(html: string, status: number): string {
+  const membership = html.match(/"membershipStatus":"([A-Z_]+)"/)?.[1] || '?';
+  const layout = html.match(/"clPageName":"([^"]+)"/)?.[1] || '?';
+  const fields = Array.from(new Set(Array.from(html.matchAll(/<input[^>]*\bname="([^"]{1,40})"/g)).map((m) => m[1]))).slice(0, 8);
+  const auth = extractAuthUrl(html);
+  return `HTTP ${status}, ${html.length} bytes, membership=${membership}, mode=${pageMode(html) || 'none'}, page=${layout}, screen=${screenName(html) || 'none'}, fields=[${fields.join(',')}], authURL=${auth ? auth.from : 'none'}`;
 }
 
 /** Page "mode" from Netflix's embedded reactContext (e.g. enterTvLoginRendezvousCode). */
@@ -128,10 +167,12 @@ export async function confirmTvCode(account: NetflixAccount, rawCode: string): P
       );
     }
 
-    const authURL = hiddenInput(html, 'authURL');
-    if (!authURL) {
-      return result(false, 'unknown', `Netflix code page had no authURL (mode=${pageMode(html) || 'none'})`);
+    const auth = extractAuthUrl(html);
+    if (!auth) {
+      return result(false, 'unknown', `Netflix code page had no authURL (${pageFacts(html, page.status)})`);
     }
+    const authURL = auth.value;
+    const newPage = usesNewCodeField(html);
 
     // 2. Submit the code exactly as the website form does
     const form = new URLSearchParams({
@@ -141,6 +182,8 @@ export async function confirmTvCode(account: NetflixAccount, rawCode: string): P
       withFields: hiddenInput(html, 'withFields') || 'tvLoginRendezvousCode,isTvUrl2',
       code,
       tvLoginRendezvousCode: code,
+      // The new page calls the field rendezvousCode.
+      ...(newPage ? { rendezvousCode: code } : {}),
       isTvUrl2: 'true',
       action: hiddenInput(html, 'action') || 'nextAction',
     });
@@ -191,7 +234,17 @@ export async function confirmTvCode(account: NetflixAccount, rawCode: string): P
     if (submit.status === 200 && mode === CODE_MODE) {
       return result(false, 'invalid_code', 'Netflix rejected the code (still on the code page)', message);
     }
-    return result(false, submit.status === 403 || submit.status === 429 ? 'blocked' : 'unknown', `Netflix answered HTTP ${submit.status} (mode=${mode || 'none'})`, message);
+    // New page: it has no "mode"; the screen name says where Netflix ended up.
+    const screen = screenName(body);
+    if (submit.status === 200 && screen && /SUCCESS/.test(screen)) {
+      return result(true, 'success', `Netflix accepted the code (screen=${screen})`);
+    }
+    return result(
+      false,
+      submit.status === 403 || submit.status === 429 ? 'blocked' : 'unknown',
+      `Netflix answered the code submission with ${pageFacts(body, submit.status)}`,
+      message
+    );
   } catch (err: any) {
     const timeout = err?.name === 'TimeoutError' || err?.name === 'AbortError';
     return result(false, 'blocked', timeout ? 'Netflix did not respond in time' : `Could not reach Netflix: ${err?.message || 'network error'}`);
