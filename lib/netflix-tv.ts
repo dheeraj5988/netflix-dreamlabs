@@ -15,7 +15,12 @@ import { NetflixAccount } from './store';
  *     (`"authURL":"...\x2F..."`) and the code field is called rendezvousCode
  */
 
-const TV_URL = 'https://www.netflix.com/tv2';
+/**
+ * Netflix has two code pages. /tv8 still serves the classic form (hidden authURL) to everyone; /tv2 serves
+ * the redesigned page to some accounts and the classic one to others. The classic form is tried first
+ * because it is a plain form POST.
+ */
+const TV_URLS = ['https://www.netflix.com/tv8', 'https://www.netflix.com/tv2'];
 const DEFAULT_USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 const CODE_MODE = 'enterTvLoginRendezvousCode';
@@ -129,47 +134,74 @@ export async function confirmTvCode(account: NetflixAccount, rawCode: string): P
   });
 
   try {
-    // 1. Load the code page as the account
-    const page = await fetch(TV_URL, {
-      headers: {
-        ...baseHeaders,
-        Cookie: buildCookieHeader(cookies),
-        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none',
-        'Upgrade-Insecure-Requests': '1',
-      },
-      redirect: 'manual',
-      signal: AbortSignal.timeout(12000),
-      cache: 'no-store',
-    });
-    absorb(page);
+    // 1. Load the code page as the account: the first page that has the classic form wins,
+    //    otherwise the first page that loaded at all (the redesigned one).
+    let codeUrl = '';
+    let html = '';
+    let pageStatus = 0;
+    let auth: ReturnType<typeof extractAuthUrl> = null;
+    let blockedDetail = '';
 
-    if (isLoginRedirect(page)) {
-      return result(false, 'session_expired', 'Netflix redirected the code page to login: account cookies are logged out');
+    for (const url of TV_URLS) {
+      const page = await fetch(url, {
+        headers: {
+          ...baseHeaders,
+          Cookie: buildCookieHeader(cookies),
+          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Sec-Fetch-Dest': 'document',
+          'Sec-Fetch-Mode': 'navigate',
+          'Sec-Fetch-Site': 'none',
+          'Upgrade-Insecure-Requests': '1',
+        },
+        redirect: 'manual',
+        signal: AbortSignal.timeout(12000),
+        cache: 'no-store',
+      });
+      absorb(page);
+
+      if (isLoginRedirect(page)) {
+        return result(false, 'session_expired', 'Netflix redirected the code page to login: account cookies are logged out');
+      }
+      if (page.status !== 200) {
+        blockedDetail = `Netflix code page ${new URL(url).pathname} answered HTTP ${page.status}${page.headers.get('location') ? ` -> ${page.headers.get('location')}` : ''}`;
+        continue;
+      }
+
+      const body = await page.text();
+
+      // The code page also loads when logged out, so check who Netflix thinks we are.
+      const membership = body.match(/"membershipStatus":"([A-Z_]+)"/)?.[1];
+      if (membership && membership !== 'CURRENT_MEMBER') {
+        return result(
+          false,
+          'session_expired',
+          membership === 'ANONYMOUS'
+            ? 'Netflix treats these cookies as logged out (membershipStatus=ANONYMOUS)'
+            : `Netflix account is not an active member (membershipStatus=${membership})`
+        );
+      }
+
+      const found = extractAuthUrl(body);
+      if (found?.from === 'input') {
+        codeUrl = url;
+        html = body;
+        pageStatus = page.status;
+        auth = found;
+        break;
+      }
+      if (!codeUrl) {
+        codeUrl = url;
+        html = body;
+        pageStatus = page.status;
+        auth = found;
+      }
     }
-    if (page.status !== 200) {
-      return result(false, 'blocked', `Netflix code page answered HTTP ${page.status}${page.headers.get('location') ? ` -> ${page.headers.get('location')}` : ''}`);
+
+    if (!codeUrl) {
+      return result(false, 'blocked', blockedDetail || 'Netflix code page could not be loaded');
     }
-
-    const html = await page.text();
-
-    // The code page also loads when logged out, so check who Netflix thinks we are.
-    const membership = html.match(/"membershipStatus":"([A-Z_]+)"/)?.[1];
-    if (membership && membership !== 'CURRENT_MEMBER') {
-      return result(
-        false,
-        'session_expired',
-        membership === 'ANONYMOUS'
-          ? 'Netflix treats these cookies as logged out (membershipStatus=ANONYMOUS)'
-          : `Netflix account is not an active member (membershipStatus=${membership})`
-      );
-    }
-
-    const auth = extractAuthUrl(html);
     if (!auth) {
-      return result(false, 'unknown', `Netflix code page had no authURL (${pageFacts(html, page.status)})`);
+      return result(false, 'unknown', `Netflix code page ${new URL(codeUrl).pathname} had no authURL (${pageFacts(html, pageStatus)})`);
     }
     const authURL = auth.value;
     const newPage = usesNewCodeField(html);
@@ -188,7 +220,7 @@ export async function confirmTvCode(account: NetflixAccount, rawCode: string): P
       action: hiddenInput(html, 'action') || 'nextAction',
     });
 
-    const submit = await fetch(TV_URL, {
+    const submit = await fetch(codeUrl, {
       method: 'POST',
       headers: {
         ...baseHeaders,
@@ -196,7 +228,7 @@ export async function confirmTvCode(account: NetflixAccount, rawCode: string): P
         'Content-Type': 'application/x-www-form-urlencoded',
         Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         Origin: 'https://www.netflix.com',
-        Referer: TV_URL,
+        Referer: codeUrl,
         'Sec-Fetch-Dest': 'document',
         'Sec-Fetch-Mode': 'navigate',
         'Sec-Fetch-Site': 'same-origin',
@@ -242,7 +274,7 @@ export async function confirmTvCode(account: NetflixAccount, rawCode: string): P
     return result(
       false,
       submit.status === 403 || submit.status === 429 ? 'blocked' : 'unknown',
-      `Netflix answered the code submission with ${pageFacts(body, submit.status)}`,
+      `Netflix answered the code submission to ${new URL(codeUrl).pathname} with ${pageFacts(body, submit.status)}`,
       message
     );
   } catch (err: any) {
