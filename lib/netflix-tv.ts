@@ -1,6 +1,7 @@
 import 'server-only';
 import { BrowserCookie, buildCookieHeader } from './netflix-cookies';
 import { mergeUpdatedCookies } from './netflix-keepalive';
+import { submitRendezvousCode } from './netflix-clcs';
 import { NetflixAccount } from './store';
 
 /**
@@ -10,9 +11,9 @@ import { NetflixAccount } from './store';
  *   2. POST /tv2  with authURL + code      -> Netflix links the TV
  *
  * Netflix serves two versions of the code page:
- *   - classic: hidden <input name="authURL"> and a field called tvLoginRendezvousCode
- *   - new (CLCS): no hidden inputs; authURL only inside the embedded page data
- *     (`"authURL":"...\x2F..."`) and the code field is called rendezvousCode
+ *   - classic: hidden <input name="authURL"> and a field called tvLoginRendezvousCode, submitted as a form POST
+ *   - new (CLCS): no hidden inputs, the code field is called rendezvousCode, and the code is sent with a GraphQL
+ *     mutation by the page's own script (see netflix-clcs.ts)
  */
 
 /**
@@ -205,6 +206,19 @@ export async function confirmTvCode(account: NetflixAccount, rawCode: string): P
     }
     const authURL = auth.value;
     const newPage = usesNewCodeField(html);
+
+    // The redesigned page has no form to post: its script sends the code with a GraphQL mutation.
+    if (newPage && auth.from === 'page-data') {
+      const sent = await submitRendezvousCode({
+        html,
+        code,
+        ua,
+        referer: codeUrl,
+        cookieHeader: () => buildCookieHeader(cookies),
+        onResponse: absorb,
+      });
+      return result(sent.outcome === 'success', sent.outcome, `${sent.detail} (page ${new URL(codeUrl).pathname})`, sent.netflixMessage);
+    }
 
     // 2. Submit the code exactly as the website form does
     const form = new URLSearchParams({
